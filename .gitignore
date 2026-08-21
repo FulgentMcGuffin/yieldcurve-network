@@ -6,6 +6,34 @@ __pycache__/
 # C extensions
 *.so
 
+# Mex
+.mex/
+
+# Cursor
+.cursor/
+
+.secrets/
+.secrets
+
+# Notebook-generated pyvis output
+_pyvis_corr_network.html
+_smoke_network.html
+temp.html
+/**/temp.html
+
+# Claude
+.claude/
+CLAUDE.md
+
+# Grok
+.grok/
+
+# Gemini
+.gemini/
+
+# C extensions
+*.so
+
 # Distribution / packaging
 .Python
 build/
