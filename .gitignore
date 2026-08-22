@@ -3,6 +3,15 @@ __pycache__/
 *.py[codz]
 *$py.class
 
+# project specific files
+.secrets/
+.secrets
+src/ycn/*.png
+rsrc/pdfs/*.pdf
+src/ycn/*.bak
+**/*.bak
+**/*.corrupted.bak
+
 # C extensions
 *.so
 
@@ -12,8 +21,6 @@ __pycache__/
 # Cursor
 .cursor/
 
-.secrets/
-.secrets
 
 # Notebook-generated pyvis output
 _pyvis_corr_network.html
@@ -244,3 +251,4 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
