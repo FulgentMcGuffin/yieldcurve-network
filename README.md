@@ -72,16 +72,6 @@ uv run python scripts/make_fake_par_rates.py
 
 It writes a `par_rates` table in the same wide shape: 15 issuers × 10 terms × ~1250 business days, built from Nelson-Siegel curves whose level/slope/curvature factors follow bloc-correlated random walks, so the networks have genuine community structure rather than noise. Coverage is deliberately ragged — several issuers omit the long or short end, and two start late — which gives the User Filter grid real holes to display.
 
-> The figures below were produced from that synthetic panel (Spearman, 2018, threshold 0.33), so they illustrate the views rather than any real market.
-
-| Per-layer metrics — Issuer Network by Term | Communities — Issuer Network by Term |
-|:---:|:---:|
-| ![Edge composition and issuer × term eigenvector centrality](rsrc/images/mln_metrics_issuer_by_term.png) | ![Jaccard-aligned communities across term layers](rsrc/images/mln_community_issuer_by_term.png) |
-
-| Per-layer metrics — Term Network by Issuer | Communities — Term Network by Issuer |
-|:---:|:---:|
-| ![Edge composition and term × issuer eigenvector centrality](rsrc/images/mln_metrics_term_by_issuer.png) | ![Jaccard-aligned communities across issuer layers](rsrc/images/mln_community_term_by_issuer.png) |
-
 ### Optional: Alternating Conditional Expectations (ACE)
 
 The "Maximal correlation (ACE)" measure depends on [`ace_cream`](https://github.com/FulgentMcGuffin/ace_cream), which compiles a Fortran extension and therefore requires a Fortran compiler (`gfortran`) plus a C compiler at install time. It is kept optional:
