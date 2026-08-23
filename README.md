@@ -39,6 +39,8 @@ If you are looking for a more generic network based exploration of datasets (i.e
 6. **Manual Cell Selection**: A mouse-driven term × issuer grid for including or excluding individual `(term, issuer)` series before the networks are built — ragged coverage is the norm in curve data, and this makes it explicit rather than implicit.
 7. **Multi-Layer Metrics and Community Detection**: Per-layer intra/inter edge composition, a node × layer centrality heatmap, and per-layer community detection (ASE + KMeans) with Jaccard alignment so a community ID means the same group of nodes in every layer.
 8. **Interactive 3D Multiplex Visualization**: A rotatable Plotly stack, one plane per layer, with layer toggling and click-through to a node table.
+9. **Nelson-Siegel Residual Networks**: Strips the fitted curve from each issuer and networks the idiosyncratic remainder — one network per component network — charted with user-selectable y / shape / fill / size aesthetics.
+10. **Temporal Evolution**: Rebuilds the multiplex in every rolling window and tracks its edge composition, the community count chosen by each of five k-selection methods, Nelson-Siegel factor trajectories with regime classification, and correlation-stress indicators.
 
 ## Quickstart
 
@@ -214,11 +216,35 @@ The multiplex is built on a background thread, so the window stays responsive an
 - Expensive measures (distance correlation, mutual information) multiply across layers. Prefer Spearman, Kendall Tau or Chatterjee ξ while exploring, then re-run with the expensive one.
 - **Smoke test first**: run on a truncated date range before committing to full history.
 
-## Network Evolution — Next
+## NS Residuals
 
-Evolution analysis extends the multiplex into a **time series of multiplexes**, applying a rolling or expanding window so structural shifts, regime changes and drifting communities become visible along the curve's history.
+A curve panel is dominated by its level/slope/curvature factors: raw rates across issuers co-move so strongly that a correlation network is nearly complete and says little. Fitting a Nelson-Siegel curve to each issuer and networking the **residuals** instead shows who actually deviates together.
 
-This is **the next piece of work and is not yet wired up**. The machinery is present and retained — `EvolutionConfig`, the evolution worker, per-window centrality and community metrics, and the rolling/expanding window schedule — and the sidebar's **Evolution** group still collects its settings (window size, step, minimum nodes per window, centrality measure, community method). The **Run Evolution** checkbox is deliberately disabled until the MLN-evolution tab exists, rather than left enabled and silently inert.
+One residual network is built per component network — per maturity for *Issuer Network by Term*, per issuer for *Term Network by Issuer* — from the same `(issuer, date, term)` residual cube. The tab charts one network-level metric across those labels, with four live pickers:
+
+| Picker | Eligible columns | Default |
+|---|---|---|
+| **Y axis** | any numeric metric | `modularity` |
+| **Shape** | boolean, text, or integer with ≤10 distinct values | `is_connected` |
+| **Fill** | any numeric metric (drives the colour bar) | `modularity` |
+| **Size** | any numeric metric | `avg_eccentricity` |
+
+Title, axis label, legend and colour bar all follow the selection. **Coverage…** opens the per-issuer observation spans, which is the quickest way to see whether a network excluded someone for lack of data.
+
+This pass runs on its own thread, before the evolution pass rather than alongside it — both are compute-bound Python, so running them together would only starve the UI. It is a single snapshot, not an evolution, so it lands quickly.
+
+## Network Evolution
+
+Tick **Run Evolution** to rebuild the whole multiplex inside every rolling window and track how it changes. Four tabs:
+
+- **Evo: Links** — intra/inter edge counts and composition over time, and the community count *k* that each of the five k-selection methods picks per window. Because each window's *k* depends only on that window, there is no lookahead.
+- **Evo: NS** — *Factor* and *Factor Std* sub-tabs: Nelson-Siegel level, slope and curvature of the market-average curve and their within-window volatility, shaded by a Gaussian-mixture regime label.
+- **Evo: Cov** — the four correlation-stress indicators, one per quadrant: average |correlation|, its variance, the count of strongly correlated pairs, and a 0–100 stress indicator.
+- **Evo: Cov(t)** — a dotted time trajectory through any two of those four series. Stressed windows (indicator > 50) are ringed, the endpoints are labelled, and a date slider walks a cursor along the path.
+
+The multiplex windows come from the Evolution Settings dialog. The **factor and stress trajectories deliberately use a finer schedule of their own** (30 observations, step 10): a multiplex window has to be long enough for every layer to estimate a correlation matrix, whereas Nelson-Siegel is fitted independently on each date, so reusing the multiplex schedule would collapse those series to a handful of points.
+
+This is much slower than a single multiplex — it is `n_windows` multiplex builds plus five community detections each.
 
 ## References
 
@@ -281,7 +307,7 @@ This is **the next piece of work and is not yet wired up**. The machinery is pre
   - **Reference**: Kuhn, H. W. (1955). *"The Hungarian method for the assignment problem."* Naval Research Logistics Quarterly, 2(1-2), 83-97: [DOI (Wiley)](https://doi.org/10.1002/nav.3800020109).
   - **Implementation**: [`scipy.optimize.linear_sum_assignment`](https://docs.scipy.org/doc/scipy/reference/generated/scipy.optimize.linear_sum_assignment.html).
 
-### Planned: Temporal Evolution
+### Temporal Evolution
 
 * **Omnibus Embedding**: Simultaneously embedding multiple matched-vertex graphs into a common canonical coordinate system: [graspologic Tutorial](https://graspologic-org.github.io/graspologic/tutorials/embedding/Omnibus.html).
   - **Foundational Paper**: Levin, K., Athreya, A., Tang, M., Lyzinski, V., & Priebe, C. E. (2017). *"A central limit theorem for an omnibus embedding of multiple random graphs and implications for multiscale network inference."* [arXiv:1705.09355](https://arxiv.org/abs/1705.09355).

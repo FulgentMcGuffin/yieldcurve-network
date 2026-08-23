@@ -12,6 +12,7 @@ import networkx as nx
 from PySide6.QtCore import QObject, Signal, Slot
 import polars as pl
 
+from ycn.analysis.cancellation import ComputationCancelled
 from ycn.analysis.config import PipelineConfig
 from ycn.analysis.evolution import (
     EvolutionConfig,
@@ -40,9 +41,22 @@ from ycn.analysis.mln_viz import (
     render_mln_communities,
     render_mln_metrics,
 )
+from ycn.analysis.mln_evolution import (
+    FACTOR_STEP,
+    FACTOR_WINDOW,
+    compute_curve_factors,
+    compute_multiplex_evolution,
+    compute_stress_metrics,
+)
+from ycn.analysis.mln_evolution_viz import (
+    render_edge_evolution,
+    render_factor_evolution,
+    render_stress_quadrants,
+)
 from ycn.analysis.multiplex_data import multiplex_tables
 from ycn.analysis.pipeline import PipelineResult, run_pipeline
-from ycn.analysis.yield_curve import CurvePanel, load_long_panel
+from ycn.analysis.residual_networks import compute_residual_networks, residual_cube
+from ycn.analysis.yield_curve import CurvePanel, NetworkKind, load_long_panel
 
 # Progress callbacks fire once per node pair -- tens of thousands of times for a
 # large run. Every emit is a queued cross-thread signal that makes the GUI thread
@@ -54,16 +68,14 @@ from ycn.analysis.yield_curve import CurvePanel, load_long_panel
 _PROGRESS_EMIT_INTERVAL_S = 0.08
 
 
-class WorkerCancelled(Exception):
-    """Raised from inside a progress/status callback to unwind a cancelled worker.
-
-    ``run_pipeline``/``compute_evolution_metrics`` invoke their ``progress``
-    callback on every pair/window with no cancellation hook of their own, so
-    this is the cheapest place to interrupt a long-running computation:
-    raising here propagates as a normal exception up through the (otherwise
-    unmodified) computation and back into ``run()``, where it is caught
-    separately from real failures.
-    """
+# Raised from inside a progress/status callback to unwind a cancelled worker.
+# Computations invoke their ``progress`` callback at checkpoints with no
+# cancellation hook of their own, so this is the cheapest place to interrupt
+# one: raising here propagates as a normal exception up through the (otherwise
+# unmodified) computation and back into ``run()``, where it is caught
+# separately from real failures. Defined in the analysis layer so code there
+# can re-raise it past its own per-item ``except Exception`` handlers.
+WorkerCancelled = ComputationCancelled
 
 
 class _ThrottledProgressMixin:
@@ -488,3 +500,229 @@ class MLNWorker(_ThrottledProgressMixin, QObject):
             self.cancelled.emit()
         except Exception as exc:  # noqa: BLE001
             self.failed.emit(f"MLN analysis failed: {str(exc)}")
+
+
+@dataclass
+class ResidualResult:
+    """Artifacts from the Nelson-Siegel residual-network pass."""
+
+    metrics: pl.DataFrame
+    coverage: pl.DataFrame
+    label_column: str
+    label_order: list[str]
+    node_label: str
+    issuer_column: str
+    skipped: list[str]
+
+
+@dataclass
+class MLNEvolutionResult:
+    """Artifacts from the multi-layer-network evolution pass.
+
+    The three static figures are rendered here on the worker thread; the Cov(t)
+    trajectory is not, because it depends on axis choices the user makes after
+    the run and is cheap to draw on demand.
+    """
+
+    edge_types: pl.DataFrame
+    community_k: pl.DataFrame
+    communities: pl.DataFrame
+    factors: pl.DataFrame
+    regimes: pl.DataFrame
+    stress: pl.DataFrame
+    links_fig: Figure
+    factor_fig: Figure
+    factor_std_fig: Figure
+    stress_fig: Figure
+
+
+class ResidualWorker(_ThrottledProgressMixin, QObject):
+    """Builds the NS residual networks off the UI thread.
+
+    Independent of both the multiplex build and the evolution pass -- residual
+    networks are a single snapshot over the configured date range -- so this
+    runs on its own thread and its results land as soon as they are ready.
+    """
+
+    progress = Signal(int, int, str)
+    status = Signal(str)
+    finished = Signal(object)  # ResidualResult
+    failed = Signal(str)
+    cancelled = Signal()
+
+    def __init__(
+        self,
+        config: PipelineConfig,
+        panel: CurvePanel,
+        kind: NetworkKind,
+        *,
+        threshold: float = 0.3,
+        cancel_event: threading.Event | None = None,
+    ) -> None:
+        super().__init__()
+        self._config = config
+        self._panel = panel
+        self._kind = kind
+        self._threshold = threshold
+        self._init_throttle(cancel_event)
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            self._status_wrapper("NS: loading panel for residual networks...")
+            long = load_long_panel(self._config, self._panel)
+            if long.is_empty():
+                self.failed.emit("No rows remain for the residual networks.")
+                return
+
+            result = compute_residual_networks(
+                long,
+                self._panel,
+                self._kind,
+                self._config.date_column,
+                threshold=self._threshold,
+                progress=self._progress_wrapper,
+                status=self._status_wrapper,
+            )
+            if self._cancel_event.is_set():
+                raise WorkerCancelled()
+
+            if result.skipped:
+                names = ", ".join(result.skipped[:6])
+                self._status_wrapper(
+                    f"NS: {len(result.skipped)} issuer(s) skipped ({names})"
+                )
+            self._status_wrapper("NS: residual networks complete.")
+            self.finished.emit(
+                ResidualResult(
+                    metrics=result.metrics,
+                    coverage=result.coverage,
+                    label_column=result.label_column,
+                    label_order=result.label_order,
+                    node_label=result.node_label,
+                    issuer_column=self._panel.issuer_column,
+                    skipped=result.skipped,
+                )
+            )
+        except WorkerCancelled:
+            self.cancelled.emit()
+        except Exception as exc:  # noqa: BLE001 -- surface to UI
+            self.failed.emit(f"Residual networks failed: {exc}")
+
+
+class MLNEvolutionWorker(_ThrottledProgressMixin, QObject):
+    """Rolling-window evolution of the multiplex, the curve factors and stress.
+
+    Every status line is prefixed ``"Evolution: "`` so its log output stays
+    distinguishable from the residual worker's, which runs concurrently.
+    """
+
+    progress = Signal(int, int, str)
+    status = Signal(str)
+    finished = Signal(object)  # MLNEvolutionResult
+    failed = Signal(str)
+    cancelled = Signal()
+
+    def __init__(
+        self,
+        config: PipelineConfig,
+        panel: CurvePanel,
+        mln_config: MLNConfig,
+        evolution_config: EvolutionConfig,
+        *,
+        edge_settings: dict | None = None,
+        cancel_event: threading.Event | None = None,
+    ) -> None:
+        super().__init__()
+        self._config = config
+        self._panel = panel
+        self._mln_config = mln_config
+        self._evolution_config = evolution_config
+        self._edge_settings = edge_settings or {}
+        self._init_throttle(cancel_event)
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            cfg, panel = self._config, self._panel
+            self._status_wrapper("Evolution: loading panel...")
+            long = load_long_panel(cfg, panel)
+            if long.is_empty():
+                self.failed.emit("No rows remain for the evolution analysis.")
+                return
+
+            edge_types, community_k, communities, _windows = (
+                compute_multiplex_evolution(
+                    long,
+                    cfg,
+                    self._mln_config,
+                    self._evolution_config,
+                    edge_settings=self._edge_settings,
+                    progress=self._progress_wrapper,
+                    status=self._status_wrapper,
+                )
+            )
+            if self._cancel_event.is_set():
+                raise WorkerCancelled()
+
+            # Factors and stress are curve-level, not multiplex-level, so a
+            # failure in either must not discard the multiplex evolution that
+            # already succeeded -- the Links tab still has something to show.
+            factors = regimes = stress = pl.DataFrame()
+            try:
+                factors, regimes = compute_curve_factors(
+                    long,
+                    panel,
+                    cfg.date_column,
+                    window_size=FACTOR_WINDOW,
+                    step_size=FACTOR_STEP,
+                    status=self._status_wrapper,
+                )
+            except WorkerCancelled:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                self._status_wrapper(f"Evolution: factor evolution skipped ({exc})")
+
+            try:
+                self._status_wrapper("Evolution: computing correlation stress...")
+                _issuers, dates, cube, _terms, _skipped = residual_cube(
+                    long,
+                    panel,
+                    cfg.date_column,
+                    progress=self._progress_wrapper,
+                    status=self._status_wrapper,
+                )
+                stress = compute_stress_metrics(
+                    cube,
+                    dates,
+                    window_size=FACTOR_WINDOW,
+                    step_size=FACTOR_STEP,
+                )
+            except WorkerCancelled:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                self._status_wrapper(f"Evolution: stress analysis skipped ({exc})")
+
+            if self._cancel_event.is_set():
+                raise WorkerCancelled()
+
+            self._status_wrapper("Evolution: rendering figures...")
+            result = MLNEvolutionResult(
+                edge_types=edge_types,
+                community_k=community_k,
+                communities=communities,
+                factors=factors,
+                regimes=regimes,
+                stress=stress,
+                links_fig=render_edge_evolution(edge_types, community_k),
+                factor_fig=render_factor_evolution(factors, regimes, std=False),
+                factor_std_fig=render_factor_evolution(factors, regimes, std=True),
+                stress_fig=render_stress_quadrants(stress),
+            )
+            self._status_wrapper("Evolution: complete.")
+            self.progress.emit(1, 1, "done")
+            self.finished.emit(result)
+        except WorkerCancelled:
+            self.cancelled.emit()
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(f"Evolution analysis failed: {exc}")

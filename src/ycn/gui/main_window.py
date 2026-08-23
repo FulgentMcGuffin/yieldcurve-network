@@ -67,6 +67,7 @@ from ycn.analysis.measures import (
     measure_short_label,
 )
 from ycn.analysis.mln import MLNConfig
+from ycn.analysis.mln_evolution import FACTOR_STEP, FACTOR_WINDOW
 from ycn.analysis.multiplex_data import filter_tables
 from ycn.analysis.multiplex_plotly import build_multiplex_figure
 from ycn.analysis.transforms import available_transforms
@@ -86,9 +87,24 @@ from ycn.gui.mln_bridge import (
     inject_click_bridge,
 )
 from ycn.gui.mln_settings_dialog import MLNSettingsDialog
+from ycn.gui.coverage_dialog import CoverageDialog
+from ycn.gui.ns_residuals_tab import NSResidualsTab
+from ycn.gui.stress_trajectory_tab import StressTrajectoryTab
 from ycn.gui.styles import APP_STYLE, BG_SIDEBAR
 from ycn.gui.user_filter_dialog import UserFilterDialog
-from ycn.gui.workers import MLNResult, MLNWorker
+from ycn.gui.workers import (
+    MLNEvolutionResult,
+    MLNEvolutionWorker,
+    MLNResult,
+    MLNWorker,
+    ResidualResult,
+    ResidualWorker,
+)
+
+# Residual networks keep an edge on |corr| > this. Deliberately independent of
+# the sidebar's independence threshold: that one thresholds a similarity
+# measure in [0, 1], this one a signed correlation where the sign is noise.
+RESIDUAL_THRESHOLD = 0.3
 
 # How long Cancel Render waits for a worker to unwind before detaching from it.
 # Long enough for a cooperative worker sitting on a progress checkpoint, short
@@ -160,6 +176,17 @@ class MainWindow(QMainWindow):
         self._mln_row_of: dict[tuple[str, str], int] = {}
         self._mln_bridge = MLNBridge()
         self._mln_channel: QWebChannel | None = None
+
+        # Residual and evolution stages run concurrently after the multiplex
+        # lands. ``_active_stages`` is what keeps the busy state honest: the
+        # run is only over once every launched stage has reported back.
+        self._residual_worker: ResidualWorker | None = None
+        self._residual_worker_thread: QThread | None = None
+        self._residual_result: ResidualResult | None = None
+        self._evolution_worker: MLNEvolutionWorker | None = None
+        self._evolution_worker_thread: QThread | None = None
+        self._evolution_result: MLNEvolutionResult | None = None
+        self._active_stages: set[str] = set()
 
         root = QWidget()
         root.setObjectName("Root")
@@ -359,13 +386,11 @@ class MainWindow(QMainWindow):
 
         evolution_body = self._collapsible_section(form, "EVOLUTION", collapsed=True)
         self.chk_evolution = QCheckBox("Run Evolution")
-        # Kept (with its settings) for the MLN-evolution stage, which is the
-        # next piece of work. Disabled rather than silently inert so the state
-        # of the feature is visible.
-        self.chk_evolution.setEnabled(False)
         self.chk_evolution.setToolTip(
-            "Evolution of the multi-layer network is not wired up yet. "
-            "Settings entered here are retained for it."
+            "Rebuild the multiplex inside every rolling window and track its "
+            "edge composition, community count, curve factors and correlation "
+            "stress. Much slower than the single multiplex — the four "
+            "'Evo:' tabs stay empty until this is ticked."
         )
         evolution_body.addWidget(self.chk_evolution)
         self.btn_evolution_settings = QPushButton("⚙ Evolution Settings")
@@ -436,6 +461,31 @@ class MainWindow(QMainWindow):
         self._set_mln_community_placeholder()
         self.tabs.addTab(mln_comm_page, "MLN: Community")
 
+        self.tab_ns = NSResidualsTab(self._show_coverage)
+        self.tabs.addTab(self.tab_ns, "NS Residuals")
+
+        self.evo_links_layout, links_page = self._figure_page()
+        self.tabs.addTab(links_page, "Evo: Links")
+
+        # "Evo: NS" holds the two factor views as sub-tabs so they can be read
+        # against each other without another top-level tab each.
+        self.tabs_evo_ns = QTabWidget()
+        self.tabs_evo_ns.setObjectName("ResultTabs")
+        self.evo_factor_layout, factor_page = self._figure_page()
+        self.evo_factor_std_layout, factor_std_page = self._figure_page()
+        self.tabs_evo_ns.addTab(factor_page, "Factor")
+        self.tabs_evo_ns.addTab(factor_std_page, "Factor Std")
+        self.tabs_evo_ns.currentChanged.connect(self._update_view_data_button)
+        self.tabs.addTab(self.tabs_evo_ns, "Evo: NS")
+
+        self.evo_cov_layout, cov_page = self._figure_page()
+        self.tabs.addTab(cov_page, "Evo: Cov")
+
+        self.tab_cov_t = StressTrajectoryTab()
+        self.tabs.addTab(self.tab_cov_t, "Evo: Cov(t)")
+
+        self._clear_evolution_tabs()
+
         self.btn_view_data = QToolButton()
         self.btn_view_data.setObjectName("ViewDataButton")
         self.btn_view_data.setIcon(eye_icon())
@@ -464,6 +514,29 @@ class MainWindow(QMainWindow):
         self.process_log.setMaximumHeight(220)
         layout.addWidget(self.process_log, stretch=0)
         return wrap
+
+    def _figure_page(self) -> tuple[QVBoxLayout, QWidget]:
+        """A themed page whose only content is one swappable FigureCanvas."""
+        page = QFrame()
+        page.setObjectName("Canvas")
+        outer = QVBoxLayout(page)
+        outer.setContentsMargins(8, 8, 8, 8)
+        container = QWidget()
+        layout = QVBoxLayout(container)
+        layout.setContentsMargins(0, 0, 0, 0)
+        outer.addWidget(container)
+        return layout, page
+
+    def _show_figure(self, layout: QVBoxLayout, fig: Figure) -> None:
+        """Replace whatever is in ``layout`` with a canvas for ``fig``."""
+        try:
+            self._clear_layout(layout)
+            canvas = FigureCanvas(fig)
+            canvas.setStyleSheet("background-color: transparent;")
+            layout.addWidget(canvas)
+            canvas.draw()
+        except Exception as exc:  # noqa: BLE001
+            self._append_log(f"Figure display error: {exc}")
 
     @staticmethod
     def _section(text: str) -> QLabel:
@@ -513,17 +586,70 @@ class MainWindow(QMainWindow):
         self.btn_view_data.setEnabled(self._tab_dataframe() is not None)
 
     def _tab_dataframe(self) -> tuple[str, pl.DataFrame] | None:
-        """Return (tab title, frame) for the selected tab, or None if not rendered."""
+        """Return (tab title, frame) for the selected tab, or None if not rendered.
+
+        Every tab that renders something also exposes the frame behind it, so
+        the eye button is never a dead control on a populated tab.
+        """
         title = self.tabs.tabText(self.tabs.currentIndex())
-        if self._mln_result is None:
-            return None
-        if title == "MLN":
-            return title, self._mln_edge_frame(self._mln_result)
-        if title == "MLN: Metrics":
-            return title, self._mln_result.centrality_df
-        if title == "MLN: Community":
+
+        if title in ("MLN", "MLN: Metrics", "MLN: Community"):
+            if self._mln_result is None:
+                return None
+            if title == "MLN":
+                return title, self._mln_edge_frame(self._mln_result)
+            if title == "MLN: Metrics":
+                return title, self._mln_result.centrality_df
             return title, self._mln_result.community_df
+
+        if title == "NS Residuals":
+            residual = self._residual_result
+            if residual is None or residual.metrics.is_empty():
+                return None
+            return title, residual.metrics
+
+        evolution = self._evolution_result
+        if evolution is None:
+            return None
+        if title == "Evo: Links":
+            return title, self._links_frame(evolution)
+        if title == "Evo: NS":
+            frame = self._factors_frame(evolution)
+            sub = self.tabs_evo_ns.tabText(self.tabs_evo_ns.currentIndex())
+            return f"{title} — {sub}", frame
+        if title in ("Evo: Cov", "Evo: Cov(t)"):
+            if evolution.stress.is_empty():
+                return None
+            return title, evolution.stress
         return None
+
+    @staticmethod
+    def _links_frame(result: MLNEvolutionResult) -> pl.DataFrame:
+        """Edge composition per window, widened with each method's chosen k.
+
+        The tab shows both panels, so the data behind it is both -- joined on
+        the window rather than offered as two separate tables.
+        """
+        edges = result.edge_types
+        if edges.is_empty() or result.community_k.is_empty():
+            return edges
+        wide = result.community_k.pivot(
+            on="method", index="window_idx", values="n_clusters"
+        )
+        renamed = {c: f"k_{c}" for c in wide.columns if c != "window_idx"}
+        return edges.join(wide.rename(renamed), on="window_idx", how="left")
+
+    @staticmethod
+    def _factors_frame(result: MLNEvolutionResult) -> pl.DataFrame:
+        """Factor means and volatilities per window, with the regime label."""
+        factors = result.factors
+        if factors.is_empty() or result.regimes.is_empty():
+            return factors
+        return factors.join(
+            result.regimes.select(["window_idx", "regime"]),
+            on="window_idx",
+            how="left",
+        )
 
     @staticmethod
     def _mln_edge_frame(result: MLNResult) -> pl.DataFrame:
@@ -747,6 +873,7 @@ class MainWindow(QMainWindow):
             widget.setEnabled(enabled)
         # Evolution settings stay configurable ahead of the feature landing.
         self.btn_evolution_settings.setEnabled(enabled)
+        self.chk_evolution.setEnabled(enabled)
         self.txt_filter_where.setEnabled(enabled and self.chk_filter_where.isChecked())
         if enabled and (
             self._db_path is None or self._panel is None or not self._panel.is_usable
@@ -870,7 +997,8 @@ class MainWindow(QMainWindow):
             self._evolution_config = dialog.get_config()
             self._append_log(
                 f"Evolution settings: window={self._evolution_config.window_size}, "
-                f"step={self._evolution_config.step_size}, "
+                f"step={self._evolution_config.step}, "
+                f"expanding={self._evolution_config.expanding}, "
                 f"centrality={self._evolution_config.centrality}"
             )
 
@@ -1024,7 +1152,264 @@ class MainWindow(QMainWindow):
         self._mln_worker.finished.connect(self._mln_worker_thread.quit)
         self._mln_worker.failed.connect(self._mln_worker_thread.quit)
         self._mln_worker.cancelled.connect(self._mln_worker_thread.quit)
+        self._active_stages = {"mln"}
         self._mln_worker_thread.start()
+
+    # ------------------------------------------------------- follow-on stages
+    def _stage_done(self, stage: str) -> None:
+        """Mark one stage complete; leave busy only when all of them are."""
+        self._active_stages.discard(stage)
+        if not self._active_stages:
+            self._set_busy(False)
+            self.progress.setValue(100)
+
+    def _launch_follow_on_stages(self) -> None:
+        """Queue the residual and evolution passes once the multiplex is up.
+
+        They run **one after the other**, not together. Both are CPU-bound and
+        overwhelmingly pure Python (scipy curve fits, networkx traversals), so
+        under the GIL running them concurrently buys no throughput -- it just
+        adds a second thread competing with the GUI for the interpreter, which
+        is what made the window crawl. Sequential costs the same wall time,
+        and the cheap residual pass lands first.
+        """
+        if self._cancel_event.is_set() or self._last_config is None:
+            return
+        if self._panel is None:
+            return
+
+        self._active_stages.add("residual")
+        if self.chk_evolution.isChecked():
+            # Reserved now, started when the residual pass reports back, so the
+            # run does not look finished in between.
+            self._active_stages.add("evolution")
+            self._set_evolution_building()
+        else:
+            self._clear_evolution_tabs(
+                "Tick “Run Evolution” in the sidebar to compute this."
+            )
+
+        self.tab_ns.set_placeholder("Computing residual networks…")
+        self._residual_worker_thread = QThread(self)
+        self._residual_worker = ResidualWorker(
+            self._last_config,
+            self._panel,
+            NetworkKind(self._last_config.network_kind),
+            threshold=RESIDUAL_THRESHOLD,
+            cancel_event=self._cancel_event,
+        )
+        self._wire_stage(
+            self._residual_worker,
+            self._residual_worker_thread,
+            self._on_residual_progress,
+            self._on_residual_status,
+            self._on_residual_finished,
+            self._on_residual_failed,
+            self._on_residual_cancelled,
+        )
+
+    def _start_evolution_if_pending(self) -> None:
+        """Begin the evolution pass, once the residual pass has stepped aside."""
+        if "evolution" not in self._active_stages:
+            return
+        if self._evolution_worker is not None or self._cancel_event.is_set():
+            return
+        if self._last_config is None or self._panel is None:
+            self._stage_done("evolution")
+            return
+
+        panel = self._panel
+        kind = NetworkKind(self._last_config.network_kind)
+        self._evolution_config.independent_threshold = float(
+            self.spin_threshold.value()
+        )
+        self._evolution_config.measure = self._last_config.measure
+        self._append_log(
+            f"Evolution: window={self._evolution_config.window_size}, "
+            f"step={self._evolution_config.step}, "
+            f"expanding={self._evolution_config.expanding} "
+            f"(factor/stress use their own {FACTOR_WINDOW}/{FACTOR_STEP} schedule)"
+        )
+        self._evolution_worker_thread = QThread(self)
+        self._evolution_worker = MLNEvolutionWorker(
+            self._last_config,
+            panel,
+            MLNConfig(
+                layer_column=panel.layer_column(kind),
+                centrality=self._mln_config.centrality,
+                jaccard_threshold=self._mln_config.jaccard_threshold,
+                community_method=self._mln_config.community_method,
+                max_communities=self._mln_config.max_communities,
+                min_nodes=self._mln_config.min_nodes,
+            ),
+            self._evolution_config,
+            edge_settings=self._edge_settings.to_dict(),
+            cancel_event=self._cancel_event,
+        )
+        self._wire_stage(
+            self._evolution_worker,
+            self._evolution_worker_thread,
+            self._on_evolution_progress,
+            self._on_evolution_status,
+            self._on_evolution_finished,
+            self._on_evolution_failed,
+            self._on_evolution_cancelled,
+        )
+
+    @staticmethod
+    def _wire_stage(
+        worker, thread, on_progress, on_status, on_finished, on_failed, on_cancelled
+    ) -> None:
+        """Standard worker/thread wiring, then start at low priority.
+
+        Low priority matters here: the analysis threads are compute-bound and
+        would otherwise be scheduled on equal terms with the thread that has to
+        repaint the window and service clicks.
+        """
+        worker.moveToThread(thread)
+        thread.started.connect(worker.run)
+        worker.progress.connect(on_progress)
+        worker.status.connect(on_status)
+        worker.finished.connect(on_finished)
+        worker.failed.connect(on_failed)
+        worker.cancelled.connect(on_cancelled)
+        worker.finished.connect(thread.quit)
+        worker.failed.connect(thread.quit)
+        worker.cancelled.connect(thread.quit)
+        thread.start(QThread.Priority.LowPriority)
+
+    # ------------------------------------------------------- residual signals
+    def _on_residual_progress(self, done: int, total: int, desc: str) -> None:
+        if self._is_stale(self._residual_worker) or total <= 0:
+            return
+        self.lbl_status.setText(f"NS residuals: {desc}")
+
+    def _on_residual_status(self, message: str) -> None:
+        if self._is_stale(self._residual_worker):
+            return
+        self.lbl_status.setText(message)
+        self._append_log(message)
+
+    def _on_residual_finished(self, result: object) -> None:
+        if self._is_stale(self._residual_worker):
+            return
+        if not isinstance(result, ResidualResult):
+            self._on_residual_failed(f"Unexpected residual result: {type(result)!r}")
+            return
+        self._residual_result = result
+        self.tab_ns.set_result(result.metrics, result.label_order, result.label_column)
+        self._append_log(
+            f"NS residuals: {result.metrics.height} component network(s) rendered."
+        )
+        self._residual_worker = None
+        self._residual_worker_thread = None
+        self._update_view_data_button()
+        self._stage_done("residual")
+        self._start_evolution_if_pending()
+
+    def _on_residual_failed(self, message: str) -> None:
+        if self._is_stale(self._residual_worker):
+            return
+        self._append_log(f"NS ERROR: {message}")
+        self.tab_ns.set_placeholder(f"Residual networks failed:\n{message}")
+        self._residual_result = None
+        self._residual_worker = None
+        self._residual_worker_thread = None
+        self._update_view_data_button()
+        self._stage_done("residual")
+        # The evolution pass does not depend on the residual networks, so a
+        # failure here must not silently cancel it.
+        self._start_evolution_if_pending()
+
+    def _on_residual_cancelled(self) -> None:
+        if self._is_stale(self._residual_worker):
+            return
+        self._residual_worker = None
+        self._residual_worker_thread = None
+
+    def _show_coverage(self) -> None:
+        """Open the coverage-by-issuer pop-up for the current residual run."""
+        result = self._residual_result
+        if result is None or result.coverage.is_empty():
+            QMessageBox.information(
+                self,
+                "Coverage",
+                "Build a network first — coverage is computed from the loaded panel.",
+            )
+            return
+        CoverageDialog(result.coverage, result.issuer_column, parent=self).exec()
+
+    # ------------------------------------------------------ evolution signals
+    def _on_evolution_progress(self, done: int, total: int, desc: str) -> None:
+        if self._is_stale(self._evolution_worker) or total <= 0:
+            return
+        self.progress.setValue(int(100 * done / total))
+        self.lbl_status.setText(f"Evolution: {desc}")
+
+    def _on_evolution_status(self, message: str) -> None:
+        if self._is_stale(self._evolution_worker):
+            return
+        self.lbl_status.setText(message)
+        self._append_log(message)
+
+    def _on_evolution_finished(self, result: object) -> None:
+        if self._is_stale(self._evolution_worker):
+            return
+        if not isinstance(result, MLNEvolutionResult):
+            self._on_evolution_failed(f"Unexpected evolution result: {type(result)!r}")
+            return
+        self._evolution_result = result
+        self._show_figure(self.evo_links_layout, result.links_fig)
+        self._show_figure(self.evo_factor_layout, result.factor_fig)
+        self._show_figure(self.evo_factor_std_layout, result.factor_std_fig)
+        self._show_figure(self.evo_cov_layout, result.stress_fig)
+        self.tab_cov_t.set_result(result.stress)
+        self._append_log(
+            f"Evolution rendered: {result.edge_types.height} window(s), "
+            f"{result.factors.height} factor window(s), "
+            f"{result.stress.height} stress window(s)."
+        )
+        self._evolution_worker = None
+        self._evolution_worker_thread = None
+        self._update_view_data_button()
+        self._stage_done("evolution")
+
+    def _on_evolution_failed(self, message: str) -> None:
+        if self._is_stale(self._evolution_worker):
+            return
+        self._append_log(f"EVOLUTION ERROR: {message}")
+        self._clear_evolution_tabs(f"Evolution failed:\n{message}")
+        self._evolution_worker = None
+        self._evolution_worker_thread = None
+        self._update_view_data_button()
+        self._stage_done("evolution")
+
+    def _on_evolution_cancelled(self) -> None:
+        if self._is_stale(self._evolution_worker):
+            return
+        self._evolution_worker = None
+        self._evolution_worker_thread = None
+
+    # ------------------------------------------------------ evolution canvases
+    def _evolution_placeholder(self, layout: QVBoxLayout, message: str) -> None:
+        self._clear_layout(layout)
+        layout.addWidget(self._mln_placeholder_label(message))
+
+    def _clear_evolution_tabs(self, message: str | None = None) -> None:
+        text = message or "Evolution results will appear here after a build."
+        for layout in (
+            self.evo_links_layout,
+            self.evo_factor_layout,
+            self.evo_factor_std_layout,
+            self.evo_cov_layout,
+        ):
+            self._evolution_placeholder(layout, text)
+        self.tab_cov_t.set_placeholder(text)
+        self._evolution_result = None
+        self._update_view_data_button()
+
+    def _set_evolution_building(self) -> None:
+        self._clear_evolution_tabs("Computing evolution…")
 
     # ------------------------------------------------------- worker lifecycle
     def _is_stale(self, current) -> bool:
@@ -1095,21 +1480,36 @@ class MainWindow(QMainWindow):
         # the GUI here for the whole timeout. Detaching instead keeps the button
         # instant; the discarded thread exits on its next checkpoint and its
         # signals are ignored (see _is_stale).
-        thread = self._mln_worker_thread
-        if thread is not None and thread.isRunning():
+        for thread, label in (
+            (self._mln_worker_thread, "MLN"),
+            (self._residual_worker_thread, "NS residuals"),
+            (self._evolution_worker_thread, "Evolution"),
+        ):
+            if thread is None or not thread.isRunning():
+                continue
             thread.quit()
             if thread.wait(CANCEL_GRACE_MS):
-                self._append_log("MLN cancelled.")
+                self._append_log(f"{label} cancelled.")
             else:
                 self._append_log(
-                    "MLN is finishing in the background; its results will "
+                    f"{label} is finishing in the background; its results will "
                     "be discarded."
                 )
 
         self._retire_worker(self._mln_worker, self._mln_worker_thread)
+        self._retire_worker(self._residual_worker, self._residual_worker_thread)
+        self._retire_worker(self._evolution_worker, self._evolution_worker_thread)
         self._cleanup_mln_worker()
+        self._residual_worker = None
+        self._residual_worker_thread = None
+        self._evolution_worker = None
+        self._evolution_worker_thread = None
+        self._active_stages.clear()
 
         self._clear_mln_tabs("Render cancelled.")
+        self._residual_result = None
+        self.tab_ns.set_placeholder("Render cancelled.")
+        self._clear_evolution_tabs("Render cancelled.")
         self.progress.setValue(0)
         self.lbl_status.setText("Render cancelled. Polars data retained.")
         self._set_busy(False)
@@ -1290,12 +1690,15 @@ class MainWindow(QMainWindow):
         self._render_mln_view()
         self._show_mln_metrics(result.metrics_fig)
         self._show_mln_community(result.community_fig)
-        self.progress.setValue(100)
         self.lbl_status.setText("MLN ready.")
         self._append_log("MLN rendered.")
         self._cleanup_mln_worker()
         self._update_view_data_button()
-        self._set_busy(False)
+        # The residual and evolution passes only make sense once the multiplex
+        # is up, but neither depends on its output -- they re-derive from the
+        # same panel, on their own threads.
+        self._launch_follow_on_stages()
+        self._stage_done("mln")
 
     def _on_mln_failed(self, message: str) -> None:
         if self._is_stale(self._mln_worker):
@@ -1304,7 +1707,10 @@ class MainWindow(QMainWindow):
         self._append_log(f"MLN ERROR: {message}")
         self.lbl_status.setText("Failed.")
         self._clear_mln_tabs(f"MLN failed: {message}")
+        self.tab_ns.set_placeholder("MLN failed — residual networks not run.")
+        self._clear_evolution_tabs("MLN failed — evolution not run.")
         self._cleanup_mln_worker()
+        self._active_stages.clear()
         self._set_busy(False)
         QMessageBox.critical(self, "MLN failed", message)
 
@@ -1449,9 +1855,14 @@ class MainWindow(QMainWindow):
         # Same fix as _cancel_render: set the flag before quit()/wait() so a
         # worker mid-computation unwinds instead of the 2s wait timing out.
         self._cancel_event.set()
-        if self._mln_worker_thread is not None and self._mln_worker_thread.isRunning():
-            self._mln_worker_thread.quit()
-            self._mln_worker_thread.wait(2000)
+        for thread in (
+            self._mln_worker_thread,
+            self._residual_worker_thread,
+            self._evolution_worker_thread,
+        ):
+            if thread is not None and thread.isRunning():
+                thread.quit()
+                thread.wait(2000)
         if self._mln_temp_dir and self._mln_temp_dir.exists():
             import shutil
 
