@@ -993,14 +993,34 @@ class MainWindow(QMainWindow):
                 f"max_communities={self._mln_config.max_communities}"
             )
 
+    def _sync_evolution_from_sidebar(self) -> None:
+        """Copy the sidebar's live values onto the evolution config.
+
+        The edge threshold lives on the sidebar spinbox but is *shown* by the
+        Evolution Settings dialog, which reads it off this config. Both the
+        dialog and the launcher call this, so the displayed value can never
+        drift from the one the run will actually use.
+        """
+        self._evolution_config.independent_threshold = float(
+            self.spin_threshold.value()
+        )
+        if self._last_config is not None:
+            self._evolution_config.measure = self._last_config.measure
+
     def _show_evolution_settings(self) -> None:
-        dialog = EvolutionSettingsDialog(self, initial_config=self._evolution_config)
+        self._sync_evolution_from_sidebar()
+        dialog = EvolutionSettingsDialog(
+            self,
+            initial_config=self._evolution_config,
+            independent_threshold=float(self.spin_threshold.value()),
+        )
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self._evolution_config = dialog.get_config()
             self._append_log(
                 f"Evolution settings: window={self._evolution_config.window_size}, "
                 f"step={self._evolution_config.step}, "
                 f"expanding={self._evolution_config.expanding}, "
+                f"edge threshold={self._evolution_config.independent_threshold:.2f}, "
                 f"centrality={self._evolution_config.centrality}"
             )
 
@@ -1222,14 +1242,12 @@ class MainWindow(QMainWindow):
 
         panel = self._panel
         kind = NetworkKind(self._last_config.network_kind)
-        self._evolution_config.independent_threshold = float(
-            self.spin_threshold.value()
-        )
-        self._evolution_config.measure = self._last_config.measure
+        self._sync_evolution_from_sidebar()
         self._append_log(
             f"Evolution: window={self._evolution_config.window_size}, "
             f"step={self._evolution_config.step}, "
-            f"expanding={self._evolution_config.expanding} "
+            f"expanding={self._evolution_config.expanding}, "
+            f"edge threshold={self._evolution_config.independent_threshold:.2f} "
             f"(factor/stress use their own {FACTOR_WINDOW}/{FACTOR_STEP} schedule)"
         )
         self._evolution_worker_thread = QThread(self)

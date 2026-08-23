@@ -42,6 +42,8 @@ class StressTrajectoryTab(QFrame):
         self._plot: TrajectoryPlot | None = None
         self._canvas: FigureCanvas | None = None
         self._syncing = False
+        # Last valid axis indices, so a collision can be resolved by swapping.
+        self._previous: dict[str, int] = {"x": 0, "y": 1}
 
         outer = QVBoxLayout(self)
         outer.setContentsMargins(8, 8, 8, 8)
@@ -49,8 +51,8 @@ class StressTrajectoryTab(QFrame):
 
         controls = QHBoxLayout()
         controls.setSpacing(6)
-        self.cmb_x = self._picker(controls, "X axis")
-        self.cmb_y = self._picker(controls, "Y axis")
+        self.cmb_x = self._picker(controls, "X axis", "x")
+        self.cmb_y = self._picker(controls, "Y axis", "y")
         controls.addStretch(1)
         self.lbl_warning = QLabel("")
         self.lbl_warning.setStyleSheet(f"color: {TEXT_MUTED};")
@@ -83,7 +85,7 @@ class StressTrajectoryTab(QFrame):
             "The stress trajectory will appear here after the evolution runs."
         )
 
-    def _picker(self, row: QHBoxLayout, title: str) -> QComboBox:
+    def _picker(self, row: QHBoxLayout, title: str, role: str) -> QComboBox:
         label = QLabel(f"{title}:")
         label.setStyleSheet(f"color: {TEXT_MUTED};")
         row.addWidget(label)
@@ -91,7 +93,9 @@ class StressTrajectoryTab(QFrame):
         combo.setMinimumWidth(230)
         for column, display in STRESS_SERIES.items():
             combo.addItem(display, column)
-        combo.currentIndexChanged.connect(self._on_axis_changed)
+        combo.currentIndexChanged.connect(
+            lambda _index, which=role: self._on_axis_changed(which)
+        )
         row.addWidget(combo)
         return combo
 
@@ -133,6 +137,7 @@ class StressTrajectoryTab(QFrame):
         self.cmb_x.setCurrentIndex(max(x_index, 0))
         self.cmb_y.setCurrentIndex(max(y_index, 0))
         self._syncing = False
+        self._remember_axes()
 
         self.slider.blockSignals(True)
         self.slider.setMaximum(max(len(self._dates) - 1, 0))
@@ -145,10 +150,30 @@ class StressTrajectoryTab(QFrame):
     def stress(self) -> pl.DataFrame:
         return self._stress
 
-    def _on_axis_changed(self, _index: int) -> None:
+    def _on_axis_changed(self, role: str) -> None:
+        """Redraw, swapping the other axis if the two would collide.
+
+        The two axes may not carry the same series. Rather than letting the
+        user select that and then blanking the plot -- which leaves the tab
+        dead and reads as a broken slider -- picking the series already on the
+        other axis swaps them, so the pair is always valid.
+        """
         if self._syncing:
             return
+        changed = self.cmb_x if role == "x" else self.cmb_y
+        other = self.cmb_y if role == "x" else self.cmb_x
+        if changed.currentData() == other.currentData():
+            self._syncing = True
+            other.setCurrentIndex(self._previous[role])
+            self._syncing = False
+        self._remember_axes()
         self._redraw()
+
+    def _remember_axes(self) -> None:
+        self._previous = {
+            "x": self.cmb_x.currentIndex(),
+            "y": self.cmb_y.currentIndex(),
+        }
 
     def _on_slider(self, value: int) -> None:
         if self._plot is None or not self._dates:
@@ -180,6 +205,11 @@ class StressTrajectoryTab(QFrame):
         self._canvas.setStyleSheet("background-color: transparent;")
         self._holder_layout.addWidget(self._canvas)
         self._canvas.draw()
+
+        # Re-arm the scrubber. A redraw can follow ``set_placeholder`` -- which
+        # disables it -- so leaving this to ``set_result`` alone would strand
+        # the slider dead after the user briefly picked the same series twice.
+        self.slider.setEnabled(self._plot is not None and len(self._dates) > 1)
 
         stressed = (
             self._stress.filter(pl.col("stress_pct") > STRESS_THRESHOLD).height

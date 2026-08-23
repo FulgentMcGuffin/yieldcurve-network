@@ -53,15 +53,25 @@ uv run ycn-gui
 
 Point the sidebar at a DuckDB or SQLite file. If the database contains a table called `par_rates` it is selected automatically, as is a column called `date`. Otherwise, choose your relevant columns. Choose a **Network Type**, optionally narrow the data, then click **Build network**.
 
-| Issuer Network by Term | Term Network by Issuer |
+| Issuer MLN by Term | Term MLN by Issuer |
 |:---:|:---:|
 | ![Issuer Network by Term](rsrc/images/term_issuer_mln.png) | ![Term Network by Issuer](rsrc/images/issuer_term_mln.png) |
 
-| Issuer Network Centrality  | Issuer Network Communities |
+| Issuer MLN Centrality  | Issuer MLN Communities |
 |:---:|:---:|
 | ![Issuer Network Centrality](rsrc/images/term_issuer_centrality.png) | ![Issuer Network Communities](rsrc/images/term_issuer_community.png) |
 
+| Edge and Community (t)  | NS Residual Metrics |
+|:---:|:---:|
+| ![Edge and Community Evolution](rsrc/images/term_issuer_edge_community.png) | ![NS Residual Metrics](rsrc/images/term_issuer_ns_resids.png) |
 
+| NS Residuals (t)  | NS Residual Std (t)  |
+|:---:|:---:|
+| ![NS Residuals (t)](rsrc/images/issuer_term_ns_factor.png) | ![NS Residual Std (t)](rsrc/images/issuer_term_ns_factor_std.png) |
+
+| NS Residuals Corr (t)  | NS Residuals Corr trajectory (t)  |
+|:---:|:---:|
+| ![NS Residuals (t)](rsrc/images/issuer_term_ns_resids_corr.png) | ![NS Residual Std (t)](rsrc/images/issuer_term_ns_resids_relationship.png) |
 
 ### Test data
 
@@ -139,6 +149,75 @@ Note that filling a row necessarily re-checks cells you had removed column-by-co
 Only checked cells reach the network. The selection persists between openings, but is **discarded whenever the table, date column, date range or Optional Filter changes** — the selection is a set of labels, not row identities, so it stops being meaningful once the underlying data moves. The process log says when this happens.
 
 
+## Execution Model
+
+**Build network** runs three stages, each on its own worker thread, **one after the other**. Every tab in the window is filled by exactly one of them:
+
+```text
+   Build network
+        │
+        ▼
+   ┌─────────────────────────┐  log "MLN:"        ──▶  MLN
+   │ 1. Multiplex            │                    ──▶  MLN: Metrics
+   │    (always runs)        │                    ──▶  MLN: Community
+   └─────────────────────────┘
+        │
+        ▼
+   ┌─────────────────────────┐  log "NS:"         ──▶  NS Residuals
+   │ 2. NS residuals         │                         (+ Coverage… pop-up)
+   │    (always runs)        │
+   └─────────────────────────┘
+        │
+        ▼  only if "Run Evolution" is ticked
+   ┌─────────────────────────┐  log "Evolution:"  ──▶  Evo: Links
+   │ 3. Evolution            │                    ──▶  Evo: NS
+   │    (opt-in, slowest)    │                    ──▶  Evo: Cov
+   └─────────────────────────┘                    ──▶  Evo: Cov(t)
+```
+
+| # | Stage | Gated by | Cost | Tabs it fills |
+|---|---|---|---|---|
+| 1 | **Multiplex** | always | `L × O(n_layer²)` measure evaluations | MLN · MLN: Metrics · MLN: Community |
+| 2 | **NS residuals** | always | one NS fit per `(issuer, date)` | NS Residuals |
+| 3 | **Evolution** | *Run Evolution* | stage 1 repeated per window, ×5 community methods | Evo: Links · Evo: NS · Evo: Cov · Evo: Cov(t) |
+
+### 1. Multiplex thread
+
+Loads the long panel (SQL `WHERE` → date range → User Filter mask), splits it by layer, applies the transforms *per layer*, computes the pairwise measure, thresholds each layer into a graph, and assembles the multiplex. Then derives per-layer intra/inter edge metrics, the node × layer centrality matrix, and Jaccard-aligned communities.
+
+Fills **MLN** (3D multiplex), **MLN: Metrics**, **MLN: Community** — described under [Multi-Layer Network (MLN) Analysis](#multi-layer-network-mln-analysis).
+
+### 2. NS residuals thread
+
+Starts once the multiplex reports back. It does **not** consume the multiplex — it re-reads the same filtered panel — so it is a separate stage only for scheduling, not for data flow. Fits a Nelson-Siegel curve per `(issuer, date)`, assembles the `(issuer, date, term)` residual cube, and builds one residual correlation network per component-network label, plus the per-issuer coverage spans.
+
+Fills **NS Residuals** and its **Coverage…** pop-up — see [NS Residuals](#ns-residuals).
+
+### 3. Evolution thread
+
+Starts once the NS pass reports back, and only when **Run Evolution** is ticked. It runs three independent computations, and a failure in either of the last two still leaves the first rendered:
+
+| Computation | Feeds |
+|---|---|
+| Rebuild the whole multiplex in every rolling window; track edge composition and the *k* chosen by each of the five methods | **Evo: Links** |
+| Nelson-Siegel factors of the market-average curve + Gaussian-mixture regimes | **Evo: NS** (*Factor* / *Factor Std*) |
+| Rolling stability of the residual correlation structure → stress indicators | **Evo: Cov**, **Evo: Cov(t)** |
+
+Note that this stage builds **its own** NS residual cube for the stress computation rather than reusing stage 2's. The two are computed twice; sharing them is an obvious future saving.
+
+See [Network Evolution](#network-evolution).
+
+### Why sequential, and what stays responsive
+
+The stages are queued rather than run in parallel on purpose. Both analysis stages are compute-bound and overwhelmingly *pure Python* — scipy curve fits and networkx traversals — so under the GIL running them together buys no throughput and adds a second thread competing with the one that has to repaint the window. Sequential costs the same wall time and lets the cheap stages land first.
+
+- Worker threads run at **low priority**, so the scheduler favours the GUI.
+- Long inner loops take a progress callback purely so they have frequent **cancellation checkpoints** and hand the GIL back; the NS fit is chunked into blocks of dates for exactly this reason.
+- **Cancel Render** unwinds whichever stage is running within one checkpoint and clears every tab. If a worker is momentarily between checkpoints the GUI detaches from it instead of blocking, and its results are discarded when it finally exits.
+- Only **Build network** is blocked while a run is in flight; the rest of the sidebar stays editable so the next build can be set up.
+
+Every tab has an **eye button** in the top-right that opens the underlying table — Excel-style filters, `Ctrl+C` copy, and CSV/Parquet export of the displayed data.
+
 ## Multi-Layer Network (MLN) Analysis
 
 ### Anatomy of the Multiplex
@@ -180,7 +259,9 @@ The **Jaccard threshold** repairs this. After detection, each layer's communitie
 
 The consequence is that **a colour means the same group of nodes in every layer**, which is the only thing that makes the community heatmap readable across columns. Raise the threshold to demand stronger evidence before declaring two communities equivalent (yielding more, finer communities); lower it to merge more aggressively.
 
-### The Three Tabs
+### The MLN Tabs
+
+These three are filled by [stage 1](#1-multiplex-thread).
 
 #### MLN — Interactive 3D Multiplex
 
@@ -200,14 +281,6 @@ An inter-layer edge touches two layers and is therefore counted under both in th
 #### MLN: Community
 
 The node × layer community heatmap, coloured by the **Jaccard-aligned global community ID**. Reading across a row shows whether a node keeps its community across layers; reading down a column shows how a layer partitions.
-
-Every tab has an **eye button** in the top-right that opens the underlying table — Excel-style filters, `Ctrl+C` copy, and CSV/Parquet export of the displayed data.
-
-### Execution Model
-
-The multiplex is built on a background thread, so the window stays responsive and the rest of the sidebar can be edited while a build runs; only **Build network** is blocked. Progress is reported per node pair and logged with an `MLN:` prefix.
-
-**Cancel Render** is checked on every node pair, so a runaway build unwinds within one pair rather than running to completion. If a worker is momentarily between checkpoints the GUI detaches from it instead of blocking, and its results are discarded when it finally exits.
 
 ### Performance Considerations
 
@@ -231,20 +304,20 @@ One residual network is built per component network — per maturity for *Issuer
 
 Title, axis label, legend and colour bar all follow the selection. **Coverage…** opens the per-issuer observation spans, which is the quickest way to see whether a network excluded someone for lack of data.
 
-This pass runs on its own thread, before the evolution pass rather than alongside it — both are compute-bound Python, so running them together would only starve the UI. It is a single snapshot, not an evolution, so it lands quickly.
+This is [stage 2](#2-ns-residuals-thread): a single snapshot over the configured date range, not an evolution, so it lands quickly.
 
 ## Network Evolution
 
-Tick **Run Evolution** to rebuild the whole multiplex inside every rolling window and track how it changes. Four tabs:
+[Stage 3](#3-evolution-thread). Tick **Run Evolution** to rebuild the whole multiplex inside every rolling window and track how it changes. Four tabs:
 
 - **Evo: Links** — intra/inter edge counts and composition over time, and the community count *k* that each of the five k-selection methods picks per window. Because each window's *k* depends only on that window, there is no lookahead.
 - **Evo: NS** — *Factor* and *Factor Std* sub-tabs: Nelson-Siegel level, slope and curvature of the market-average curve and their within-window volatility, shaded by a Gaussian-mixture regime label.
 - **Evo: Cov** — the four correlation-stress indicators, one per quadrant: average |correlation|, its variance, the count of strongly correlated pairs, and a 0–100 stress indicator.
-- **Evo: Cov(t)** — a dotted time trajectory through any two of those four series. Stressed windows (indicator > 50) are ringed, the endpoints are labelled, and a date slider walks a cursor along the path.
+- **Evo: Cov(t)** — a dotted time trajectory through any two of those four series. Stressed windows (indicator > 50) are ringed, the endpoints are labelled, and a date slider walks a cursor along the path. The two axes can never carry the same series: picking the one already on the other axis swaps them.
 
 The multiplex windows come from the Evolution Settings dialog. The **factor and stress trajectories deliberately use a finer schedule of their own** (30 observations, step 10): a multiplex window has to be long enough for every layer to estimate a correlation matrix, whereas Nelson-Siegel is fitted independently on each date, so reusing the multiplex schedule would collapse those series to a handful of points.
 
-This is much slower than a single multiplex — it is `n_windows` multiplex builds plus five community detections each.
+This is much slower than a single multiplex — it is `n_windows` multiplex builds plus five community detections each — which is why it is opt-in and runs last.
 
 ## References
 
