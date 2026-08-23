@@ -42,8 +42,6 @@ from ycn.analysis.mln_viz import (
     render_mln_metrics,
 )
 from ycn.analysis.mln_evolution import (
-    FACTOR_STEP,
-    FACTOR_WINDOW,
     compute_curve_factors,
     compute_multiplex_evolution,
     compute_stress_metrics,
@@ -674,8 +672,8 @@ class MLNEvolutionWorker(_ThrottledProgressMixin, QObject):
                     long,
                     panel,
                     cfg.date_column,
-                    window_size=FACTOR_WINDOW,
-                    step_size=FACTOR_STEP,
+                    window_size=self._evolution_config.window_size,
+                    step_size=self._evolution_config.step,
                     status=self._status_wrapper,
                 )
             except WorkerCancelled:
@@ -695,8 +693,8 @@ class MLNEvolutionWorker(_ThrottledProgressMixin, QObject):
                 stress = compute_stress_metrics(
                     cube,
                     dates,
-                    window_size=FACTOR_WINDOW,
-                    step_size=FACTOR_STEP,
+                    window_size=self._evolution_config.window_size,
+                    step_size=self._evolution_config.step,
                 )
             except WorkerCancelled:
                 raise

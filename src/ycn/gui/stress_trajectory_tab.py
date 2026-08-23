@@ -4,6 +4,10 @@ Two of the four stress series become the axes; the points are joined in time
 order, stressed windows are ringed, and a slider walks a cursor along the path.
 The slider moves a single artist rather than re-rendering -- rebuilding the
 figure on every tick makes a scrub feel broken.
+
+Selection is bidirectional: the slider moves the cursor, and clicking a point
+moves the slider. Both funnel through ``_select_index`` so the two controls
+cannot drift apart.
 """
 
 from __future__ import annotations
@@ -68,6 +72,7 @@ class StressTrajectoryTab(QFrame):
         scrub.setSpacing(8)
         caption = QLabel("Date:")
         caption.setStyleSheet(f"color: {TEXT_MUTED};")
+        caption.setToolTip("Drag the slider, or click a point on the chart")
         scrub.addWidget(caption)
         self.slider = QSlider(Qt.Orientation.Horizontal)
         self.slider.setMinimum(0)
@@ -182,6 +187,28 @@ class StressTrajectoryTab(QFrame):
         self._plot.set_highlight(index)
         self.lbl_date.setText(str(self._dates[index]))
 
+    def _select_index(self, index: int) -> None:
+        """Move the selection to ``index`` from either direction.
+
+        Driving the slider is what moves the cursor, so a canvas click sets the
+        slider and lets its signal do the rest -- the two controls can never
+        disagree. When the value is already there the signal will not fire, so
+        the highlight is refreshed directly.
+        """
+        if self.slider.value() == index:
+            self._on_slider(index)
+        else:
+            self.slider.setValue(index)
+
+    def _on_canvas_click(self, event) -> None:
+        """Jump the scrubber to the trajectory point nearest the click."""
+        if self._plot is None or not self._dates:
+            return
+        index = self._plot.index_at(event)
+        if index is None:
+            return
+        self._select_index(index)
+
     def _redraw(self) -> None:
         if self._stress.is_empty():
             return
@@ -203,6 +230,8 @@ class StressTrajectoryTab(QFrame):
             figure = plot
         self._canvas = FigureCanvas(figure)
         self._canvas.setStyleSheet("background-color: transparent;")
+        self._canvas.setToolTip("Click a point to jump the date scrubber to it")
+        self._canvas.mpl_connect("button_press_event", self._on_canvas_click)
         self._holder_layout.addWidget(self._canvas)
         self._canvas.draw()
 

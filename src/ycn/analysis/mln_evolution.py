@@ -54,12 +54,10 @@ ASE_N_COMPONENTS = 8
 # Stress indicator above this counts as a stressed window.
 STRESS_THRESHOLD = 50.0
 
-# Factor and stress trajectories use their own, much finer, rolling schedule
-# than the multiplex evolution does -- and deliberately so. A multiplex window
-# has to be long (~125 days) because every layer needs enough observations to
-# estimate a correlation matrix; Nelson-Siegel is fitted independently on each
-# date, so its trajectory only needs enough dates to smooth. Reusing the
-# multiplex schedule collapses these series to a handful of points.
+# Fallback rolling schedule for the factor and stress trajectories, used only
+# when a caller does not supply one. The GUI always passes the user's evolution
+# window/step, so these two series honour the Evolution Settings dialog exactly
+# as the multiplex windows do.
 FACTOR_WINDOW = 30
 FACTOR_STEP = 10
 

@@ -15,7 +15,7 @@ from datetime import date
 from pathlib import Path
 
 from PySide6.QtCore import QDate, QSize, QThread, QUrl, Qt
-from PySide6.QtGui import QColor, QPalette, QTextCursor
+from PySide6.QtGui import QColor, QKeySequence, QPalette, QShortcut, QTextCursor
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWebChannel import QWebChannel
 from PySide6.QtWidgets import (
@@ -67,7 +67,15 @@ from ycn.analysis.measures import (
     measure_short_label,
 )
 from ycn.analysis.mln import MLNConfig
-from ycn.analysis.mln_evolution import FACTOR_STEP, FACTOR_WINDOW
+from ycn.analysis.session import (
+    FILE_FILTER,
+    SUFFIX,
+    Session,
+    SessionError,
+    describe,
+    load_session,
+    save_session,
+)
 from ycn.analysis.multiplex_data import filter_tables
 from ycn.analysis.multiplex_plotly import build_multiplex_figure
 from ycn.analysis.transforms import available_transforms
@@ -89,6 +97,15 @@ from ycn.gui.mln_bridge import (
 from ycn.gui.mln_settings_dialog import MLNSettingsDialog
 from ycn.gui.coverage_dialog import CoverageDialog
 from ycn.gui.ns_residuals_tab import NSResidualsTab
+from ycn.gui.session_io import (
+    capture_evolution,
+    capture_mln,
+    capture_residual,
+    restore_evolution,
+    restore_mln,
+    restore_residual,
+    settings_summary,
+)
 from ycn.gui.stress_trajectory_tab import StressTrajectoryTab
 from ycn.gui.styles import APP_STYLE, BG_SIDEBAR
 from ycn.gui.user_filter_dialog import UserFilterDialog
@@ -187,6 +204,9 @@ class MainWindow(QMainWindow):
         self._evolution_worker_thread: QThread | None = None
         self._evolution_result: MLNEvolutionResult | None = None
         self._active_stages: set[str] = set()
+        # True while a saved session is being applied, so signal handlers that
+        # would recompute or invalidate the restored state can stand down.
+        self._loading_settings = False
 
         root = QWidget()
         root.setObjectName("Root")
@@ -425,6 +445,37 @@ class MainWindow(QMainWindow):
         self.lbl_status.setWordWrap(True)
         form.addWidget(self.lbl_status)
 
+        form.addWidget(self._section("ANALYSIS"))
+        session_row = QHBoxLayout()
+        session_row.setSpacing(4)
+        self.btn_save_session = QPushButton("💾 Save…")
+        self.btn_save_session.setObjectName("SecondaryButton")
+        self.btn_save_session.setToolTip(
+            "Save every rendered table and the settings that produced them "
+            "to a single file (Ctrl+S)"
+        )
+        self.btn_save_session.clicked.connect(self._save_session)
+        self.btn_save_session.setEnabled(False)
+        session_row.addWidget(self.btn_save_session)
+
+        self.btn_load_session = QPushButton("📂 Load…")
+        self.btn_load_session.setObjectName("SecondaryButton")
+        self.btn_load_session.setToolTip(
+            "Reopen a saved analysis: its tabs and settings, without recomputing "
+            "(Ctrl+O)"
+        )
+        self.btn_load_session.clicked.connect(self._load_session)
+        session_row.addWidget(self.btn_load_session)
+        form.addLayout(session_row)
+
+        self.lbl_session = QLabel("")
+        self.lbl_session.setObjectName("StatusLabel")
+        self.lbl_session.setWordWrap(True)
+        form.addWidget(self.lbl_session)
+
+        QShortcut(QKeySequence.StandardKey.Save, self, self._save_session)
+        QShortcut(QKeySequence.StandardKey.Open, self, self._load_session)
+
         form.addStretch(1)
         return frame
 
@@ -586,6 +637,7 @@ class MainWindow(QMainWindow):
         if not hasattr(self, "btn_view_data"):
             return
         self.btn_view_data.setEnabled(self._tab_dataframe() is not None)
+        self._refresh_save_enabled()
 
     def _tab_dataframe(self) -> tuple[str, pl.DataFrame] | None:
         """Return (tab title, frame) for the selected tab, or None if not rendered.
@@ -731,7 +783,9 @@ class MainWindow(QMainWindow):
         self._append_log(msg)
 
     def _on_table_changed(self, table: str) -> None:
-        if not self._db_path or not table:
+        # Both this and _on_date_column_changed reset the cell mask and re-infer
+        # the panel, which is exactly what a session restore must not trigger.
+        if self._loading_settings or not self._db_path or not table:
             return
         try:
             columns = list_columns(self._db_path, table)
@@ -758,6 +812,8 @@ class MainWindow(QMainWindow):
 
     def _on_date_column_changed(self, _text: str) -> None:
         """The date column defines which columns remain available as terms."""
+        if self._loading_settings:
+            return
         self._reset_cell_mask()
         self._refresh_panel()
         self._guess_date_range()
@@ -1041,6 +1097,303 @@ class MainWindow(QMainWindow):
                 transforms.append(item.data(Qt.ItemDataRole.UserRole))
         return transforms
 
+    # ------------------------------------------------------- save / load
+    def _collect_settings(self) -> dict:
+        """Every sidebar value needed to describe and restore a run."""
+        kind = self._network_kind()
+        panel = self._panel
+        return {
+            "db_path": str(self._db_path) if self._db_path else "",
+            "table": self.cmb_table.currentText(),
+            "date_column": self.cmb_date.currentText(),
+            "network_kind": kind.value,
+            "network_kind_label": kind.label,
+            "issuer_column": panel.issuer_column if panel else "",
+            "term_columns": list(panel.term_columns) if panel else [],
+            "where_enabled": self.chk_filter_where.isChecked(),
+            "where_clause": self.txt_filter_where.text(),
+            "date_start": self.date_start.date().toPython().isoformat(),
+            "date_end": self.date_end.date().toPython().isoformat(),
+            "transforms": self._selected_transforms(),
+            "measure": self.cmb_measure.currentData(),
+            "measure_label": self.cmb_measure.currentText(),
+            "independent_threshold": float(self.spin_threshold.value()),
+            "cell_mask": (
+                sorted(self._cell_mask) if self._cell_mask is not None else None
+            ),
+            "edge_settings": self._edge_settings.to_dict(),
+            "mln": {
+                "centrality": self._mln_config.centrality,
+                "jaccard_threshold": self._mln_config.jaccard_threshold,
+                "community_method": self._mln_config.community_method.value,
+                "max_communities": self._mln_config.max_communities,
+                "min_nodes": self._mln_config.min_nodes,
+            },
+            "evolution": {
+                "enabled": self.chk_evolution.isChecked(),
+                "window_size": self._evolution_config.window_size,
+                "step": self._evolution_config.step,
+                "expanding": self._evolution_config.expanding,
+                "min_nodes": self._evolution_config.min_nodes,
+                "centrality": self._evolution_config.centrality,
+                "n_top_nodes": self._evolution_config.n_top_nodes,
+                "max_communities": self._evolution_config.max_communities,
+                "community_method": self._evolution_config.community_method.value,
+            },
+        }
+
+    def _apply_settings(self, settings: dict) -> None:
+        """Put a saved run's settings back on the sidebar.
+
+        Signals stay blocked throughout: restoring the table would otherwise
+        re-run role inference and wipe the very cell mask being restored.
+        Nothing here recomputes -- the loaded results are the results.
+        """
+        self._loading_settings = True
+        try:
+            db_path = settings.get("db_path") or ""
+            self._db_path = Path(db_path) if db_path else None
+            self.lbl_db.setText(db_path or "No database selected")
+
+            for combo, value in (
+                (self.cmb_table, settings.get("table", "")),
+                (self.cmb_date, settings.get("date_column", "")),
+            ):
+                combo.blockSignals(True)
+                if value and combo.findText(value) < 0:
+                    combo.addItem(value)
+                if value:
+                    combo.setCurrentText(value)
+                combo.blockSignals(False)
+
+            kind = settings.get("network_kind")
+            index = self.cmb_network_kind.findData(kind)
+            if index >= 0:
+                self.cmb_network_kind.blockSignals(True)
+                self.cmb_network_kind.setCurrentIndex(index)
+                self.cmb_network_kind.blockSignals(False)
+
+            issuer = settings.get("issuer_column", "")
+            terms = list(settings.get("term_columns", []))
+            if issuer and len(terms) >= 2:
+                self._panel = CurvePanel(
+                    date_column=settings.get("date_column", "date"),
+                    issuer_column=issuer,
+                    term_columns=tuple(terms),
+                )
+                preview = ", ".join(terms[:6])
+                if len(terms) > 6:
+                    preview += f", … (+{len(terms) - 6})"
+                self.lbl_panel.setText(
+                    f"Issuer column: {issuer} · {len(terms)} terms: {preview}"
+                )
+
+            self.chk_filter_where.blockSignals(True)
+            self.chk_filter_where.setChecked(bool(settings.get("where_enabled")))
+            self.chk_filter_where.blockSignals(False)
+            self.txt_filter_where.setText(settings.get("where_clause", ""))
+            self._on_where_toggled()
+
+            for widget, key in (
+                (self.date_start, "date_start"),
+                (self.date_end, "date_end"),
+            ):
+                value = settings.get(key)
+                if value:
+                    widget.setDate(QDate.fromString(str(value), "yyyy-MM-dd"))
+
+            wanted = set(settings.get("transforms", []))
+            for i in range(self.lst_transforms.count()):
+                item = self.lst_transforms.item(i)
+                item.setCheckState(
+                    Qt.CheckState.Checked
+                    if item.data(Qt.ItemDataRole.UserRole) in wanted
+                    else Qt.CheckState.Unchecked
+                )
+
+            measure = settings.get("measure")
+            index = self.cmb_measure.findData(measure)
+            if index >= 0:
+                self.cmb_measure.setCurrentIndex(index)
+            self.spin_threshold.setValue(
+                float(settings.get("independent_threshold", 0.33))
+            )
+
+            mask = settings.get("cell_mask")
+            if mask is None:
+                self._reset_cell_mask()
+            else:
+                self._cell_mask = {(str(t), str(i)) for t, i in mask}
+                self._cell_mask_key = self._mask_context_key()
+                self._update_cell_mask_label()
+
+            from ycn.gui.edge_settings_dialog import EdgeSettingsConfig
+
+            edge = settings.get("edge_settings") or {}
+            if edge:
+                try:
+                    self._edge_settings = EdgeSettingsConfig(**edge)
+                except TypeError:
+                    # An archive from a build with different edge settings:
+                    # keep the defaults rather than refusing to open it.
+                    self._append_log(
+                        "Session: edge settings from this archive are not "
+                        "recognised by this build; defaults kept."
+                    )
+
+            mln = settings.get("mln") or {}
+            if mln:
+                self._mln_config = MLNConfig(
+                    layer_column="",
+                    centrality=mln.get("centrality", "eigenvector"),
+                    jaccard_threshold=float(mln.get("jaccard_threshold", 0.6)),
+                    community_method=mln.get("community_method", "fixed"),
+                    max_communities=int(mln.get("max_communities", 10)),
+                    min_nodes=int(mln.get("min_nodes", 3)),
+                )
+
+            evo = settings.get("evolution") or {}
+            if evo:
+                self._evolution_config = EvolutionConfig(
+                    window_size=int(evo.get("window_size", 252)),
+                    step=int(evo.get("step", 21)),
+                    expanding=bool(evo.get("expanding", False)),
+                    min_nodes=int(evo.get("min_nodes", 5)),
+                    centrality=evo.get("centrality", "eigenvector"),
+                    n_top_nodes=int(evo.get("n_top_nodes", 10)),
+                    max_communities=int(evo.get("max_communities", 10)),
+                    community_method=evo.get("community_method", "fixed"),
+                    independent_threshold=float(
+                        settings.get("independent_threshold", 0.33)
+                    ),
+                )
+                self.chk_evolution.blockSignals(True)
+                self.chk_evolution.setChecked(bool(evo.get("enabled")))
+                self.chk_evolution.blockSignals(False)
+        finally:
+            self._loading_settings = False
+
+    def _save_session(self) -> None:
+        """Write every rendered table plus its settings to one archive."""
+        if not self._has_results():
+            QMessageBox.information(
+                self,
+                "Nothing to save",
+                "Build a network first — there are no results to save yet.",
+            )
+            return
+
+        suggested = (
+            Path.home() / f"{self.cmb_table.currentText() or 'analysis'}{SUFFIX}"
+        )
+        path, _ = QFileDialog.getSaveFileName(
+            self, "Save analysis", str(suggested), FILE_FILTER
+        )
+        if not path:
+            return
+
+        session = Session(settings=self._collect_settings())
+        if self._mln_result is not None:
+            capture_mln(session, self._mln_result)
+        if self._residual_result is not None:
+            capture_residual(session, self._residual_result)
+        if self._evolution_result is not None:
+            capture_evolution(session, self._evolution_result)
+
+        try:
+            written = save_session(path, session)
+        except SessionError as exc:
+            QMessageBox.critical(self, "Save failed", str(exc))
+            self._append_log(f"Session save failed: {exc}")
+            return
+
+        size_mb = written.stat().st_size / 1e6
+        self.lbl_session.setText(f"Saved: {written.name} ({size_mb:.1f} MB)")
+        self.lbl_status.setText("Analysis saved.")
+        self._append_log(
+            f"Session saved to {written} ({size_mb:.1f} MB): {describe(session)}"
+        )
+
+    def _load_session(self) -> None:
+        """Reopen a saved analysis into the tabs and the sidebar."""
+        if self._busy:
+            QMessageBox.information(
+                self,
+                "Build in progress",
+                "Wait for the current build to finish, or press Cancel Render, "
+                "before loading a saved analysis.",
+            )
+            return
+
+        path, _ = QFileDialog.getOpenFileName(
+            self, "Load analysis", str(Path.home()), FILE_FILTER
+        )
+        if not path:
+            return
+        try:
+            session = load_session(path)
+        except SessionError as exc:
+            QMessageBox.critical(self, "Load failed", str(exc))
+            self._append_log(f"Session load failed: {exc}")
+            return
+
+        self.process_log.clear()
+        self._append_log(f"Loading {Path(path).name} (saved {session.saved_at})…")
+        self._apply_settings(session.settings)
+
+        # Clear everything first: a session that lacks a stage must not leave
+        # the previous run's tabs on screen pretending to belong to it.
+        self._clear_mln_tabs("Not stored in this analysis.")
+        self.tab_ns.set_placeholder("Not stored in this analysis.")
+        self._clear_evolution_tabs("Not stored in this analysis.")
+
+        self._mln_result = restore_mln(session)
+        if self._mln_result is not None:
+            self._populate_mln_layer_list(self._mln_result)
+            self._populate_mln_table(self._mln_result)
+            self._render_mln_view()
+            self._show_mln_metrics(self._mln_result.metrics_fig)
+            self._show_mln_community(self._mln_result.community_fig)
+
+        self._residual_result = restore_residual(session)
+        if self._residual_result is not None:
+            self.tab_ns.set_result(
+                self._residual_result.metrics,
+                self._residual_result.label_order,
+                self._residual_result.label_column,
+            )
+
+        self._evolution_result = restore_evolution(session)
+        if self._evolution_result is not None:
+            self._show_figure(self.evo_links_layout, self._evolution_result.links_fig)
+            self._show_figure(self.evo_factor_layout, self._evolution_result.factor_fig)
+            self._show_figure(
+                self.evo_factor_std_layout, self._evolution_result.factor_std_fig
+            )
+            self._show_figure(self.evo_cov_layout, self._evolution_result.stress_fig)
+            self.tab_cov_t.set_result(self._evolution_result.stress)
+
+        self._set_controls_enabled(True)
+        self._update_view_data_button()
+        self.tabs.setCurrentIndex(0)
+        summary = settings_summary(session.settings)
+        self.lbl_session.setText(f"Loaded: {Path(path).name}")
+        self.lbl_status.setText(f"Loaded analysis — {summary}")
+        self._append_log(
+            f"Loaded {describe(session)} — {summary}. "
+            "Settings restored; press Build network to recompute."
+        )
+
+    def _has_results(self) -> bool:
+        return any(
+            r is not None
+            for r in (self._mln_result, self._residual_result, self._evolution_result)
+        )
+
+    def _refresh_save_enabled(self) -> None:
+        if hasattr(self, "btn_save_session"):
+            self.btn_save_session.setEnabled(self._has_results())
+
     def _network_kind(self) -> NetworkKind:
         return NetworkKind(self.cmb_network_kind.currentData())
 
@@ -1247,8 +1600,7 @@ class MainWindow(QMainWindow):
             f"Evolution: window={self._evolution_config.window_size}, "
             f"step={self._evolution_config.step}, "
             f"expanding={self._evolution_config.expanding}, "
-            f"edge threshold={self._evolution_config.independent_threshold:.2f} "
-            f"(factor/stress use their own {FACTOR_WINDOW}/{FACTOR_STEP} schedule)"
+            f"edge threshold={self._evolution_config.independent_threshold:.2f}"
         )
         self._evolution_worker_thread = QThread(self)
         self._evolution_worker = MLNEvolutionWorker(

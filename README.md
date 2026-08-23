@@ -218,6 +218,28 @@ The stages are queued rather than run in parallel on purpose. Both analysis stag
 
 Every tab has an **eye button** in the top-right that opens the underlying table — Excel-style filters, `Ctrl+C` copy, and CSV/Parquet export of the displayed data.
 
+## Saving and Reloading an Analysis
+
+A finished run can be written to a single `.ycn` file and reopened later — every tab exactly as it was rendered, plus the settings that produced it.
+
+- **💾 Save…** (`Ctrl+S`) — enabled as soon as anything has rendered. Writes whichever stages ran; a run without evolution simply stores fewer tables.
+- **📂 Load…** (`Ctrl+O`) — repopulates every tab and restores the sidebar. **Nothing is recomputed**: the stored tables *are* the result. The settings come back too, so pressing **Build network** re-runs exactly what produced the file.
+
+### What is in the file
+
+A `.ycn` is an ordinary **zip archive**:
+
+```text
+manifest.json          format version, timestamp, settings, per-stage scalars
+frames/<stage>.<name>.parquet
+```
+
+**Figures are not stored.** Every figure in this application is a pure function of a frame plus the settings, so re-rendering on load is exact. That keeps archives small — a full three-stage run over a 15 × 10 panel is around 30 KB — makes them robust to a matplotlib upgrade, and means loading a session **executes no code from the file**: there is nothing pickled in it. The manifest is plain JSON, so an archive stays inspectable with a text editor and its tables readable by anything that can open Parquet.
+
+The format is versioned. An archive written by a newer build is refused with an explanation rather than mis-parsed, and a file that is not a session at all is reported plainly.
+
+A restored session shows the settings that produced it, but does **not** re-read the database — if the underlying table has changed since, the tabs still show what was saved. Press **Build network** to bring it up to date.
+
 ## Multi-Layer Network (MLN) Analysis
 
 ### Anatomy of the Multiplex
@@ -313,9 +335,11 @@ This is [stage 2](#2-ns-residuals-thread): a single snapshot over the configured
 - **Evo: Links** — intra/inter edge counts and composition over time, and the community count *k* that each of the five k-selection methods picks per window. Because each window's *k* depends only on that window, there is no lookahead.
 - **Evo: NS** — *Factor* and *Factor Std* sub-tabs: Nelson-Siegel level, slope and curvature of the market-average curve and their within-window volatility, shaded by a Gaussian-mixture regime label.
 - **Evo: Cov** — the four correlation-stress indicators, one per quadrant: average |correlation|, its variance, the count of strongly correlated pairs, and a 0–100 stress indicator.
-- **Evo: Cov(t)** — a dotted time trajectory through any two of those four series. Stressed windows (indicator > 50) are ringed, the endpoints are labelled, and a date slider walks a cursor along the path. The two axes can never carry the same series: picking the one already on the other axis swaps them.
+- **Evo: Cov(t)** — a dotted time trajectory through any two of those four series. Stressed windows (indicator > 50) are ringed and the endpoints are labelled. Selection is **bidirectional**: drag the date slider to walk a cursor along the path, or click a point on the chart to jump the slider to that date. The two axes can never carry the same series: picking the one already on the other axis swaps them.
 
-The multiplex windows come from the Evolution Settings dialog. The **factor and stress trajectories deliberately use a finer schedule of their own** (30 observations, step 10): a multiplex window has to be long enough for every layer to estimate a correlation matrix, whereas Nelson-Siegel is fitted independently on each date, so reusing the multiplex schedule would collapse those series to a handful of points.
+All four tabs use the **window size and step from the Evolution Settings dialog** — the multiplex windows, the factor trajectories and the stress indicators alike. A smaller step gives proportionally more points on every one of them.
+
+Bear in mind that the step controls cost as well as resolution: halving it doubles the number of multiplex rebuilds, and each rebuild is a full set of per-layer correlation matrices plus five community detections.
 
 This is much slower than a single multiplex — it is `n_windows` multiplex builds plus five community detections each — which is why it is opt-in and runs last.
 

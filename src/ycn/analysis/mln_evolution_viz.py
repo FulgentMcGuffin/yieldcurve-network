@@ -37,6 +37,11 @@ from .plot_theme import (
 )
 from .plot_theme import BG
 
+# How close (in screen pixels) a click has to land to select a trajectory
+# point. Generous enough to hit a small marker, tight enough that clicking
+# empty space does nothing rather than snapping to a far-off window.
+PICK_RADIUS_PX = 28.0
+
 FACTOR_ROWS = ("Level", "Slope", "Curvature")
 _MEAN_COLUMNS = {
     "Level": "level_mean",
@@ -389,6 +394,25 @@ class TrajectoryPlot:
         canvas = self.figure.canvas
         if canvas is not None:
             canvas.draw_idle()
+
+    def index_at(self, event) -> int | None:
+        """Window index nearest a click, or None if the click missed.
+
+        Distance is measured in **pixels**, not data units: the two axes carry
+        different stress series on wildly different scales (a correlation of
+        0.2 against an edge count of 40), so a data-space nearest-point test
+        would effectively only look at whichever axis has the larger numbers.
+        """
+        if not len(self._x) or event.inaxes is not self._axes:
+            return None
+        if event.x is None or event.y is None:
+            return None
+        pixels = self._axes.transData.transform(np.column_stack([self._x, self._y]))
+        distances = np.hypot(pixels[:, 0] - event.x, pixels[:, 1] - event.y)
+        nearest = int(np.argmin(distances))
+        if distances[nearest] > PICK_RADIUS_PX:
+            return None
+        return nearest
 
 
 def render_stress_trajectory(
