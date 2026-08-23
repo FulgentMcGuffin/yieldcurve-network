@@ -63,7 +63,7 @@ Point the sidebar at a DuckDB or SQLite file. If the database contains a table c
 
 | Edge and Community (t)  | NS Residual Metrics |
 |:---:|:---:|
-| ![Edge and Community Evolution](rsrc/images/term_issuer_edge_community.png) | ![NS Residual Metrics](rsrc/images/term_issuer_ns_resids.png) |
+| ![Edge and Community Evolution](rsrc/images/term_issuer_edges_community.png) | ![NS Residual Metrics](rsrc/images/term_issuer_ns_resids.png) |
 
 | NS Residuals (t)  | NS Residual Std (t)  |
 |:---:|:---:|
