@@ -299,14 +299,6 @@ class MainWindow(QMainWindow):
         filter_body.addWidget(self.txt_filter_where)
         self._on_where_toggled()
 
-        self.btn_mln_settings = QPushButton("⚙ MLN Settings")
-        self.btn_mln_settings.setObjectName("SecondaryButton")
-        self.btn_mln_settings.clicked.connect(self._show_mln_settings)
-        self.btn_mln_settings.setToolTip(
-            "Configure MLN centrality, community method and Jaccard threshold"
-        )
-        form.addWidget(self.btn_mln_settings)
-
         self.btn_user_filter = QPushButton("▦ User Filter")
         self.btn_user_filter.setObjectName("SecondaryButton")
         self.btn_user_filter.clicked.connect(self._show_user_filter)
@@ -316,10 +308,20 @@ class MainWindow(QMainWindow):
         )
         form.addWidget(self.btn_user_filter)
 
+        # Kept directly under its button: this reports the User Filter's
+        # selection, so it must not read as a caption for MLN Settings.
         self.lbl_cell_mask = QLabel("")
         self.lbl_cell_mask.setObjectName("StatusLabel")
         self.lbl_cell_mask.setWordWrap(True)
         form.addWidget(self.lbl_cell_mask)
+
+        self.btn_mln_settings = QPushButton("⚙ MLN Settings")
+        self.btn_mln_settings.setObjectName("SecondaryButton")
+        self.btn_mln_settings.clicked.connect(self._show_mln_settings)
+        self.btn_mln_settings.setToolTip(
+            "Configure MLN centrality, community method and Jaccard threshold"
+        )
+        form.addWidget(self.btn_mln_settings)
 
         transforms_body = self._collapsible_section(
             form, "TRANSFORMS (ORDERED)", collapsed=True
