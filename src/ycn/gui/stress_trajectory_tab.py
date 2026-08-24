@@ -57,6 +57,7 @@ class StressTrajectoryTab(QFrame):
         controls.setSpacing(6)
         self.cmb_x = self._picker(controls, "X axis", "x")
         self.cmb_y = self._picker(controls, "Y axis", "y")
+        self._controls = controls
         controls.addStretch(1)
         self.lbl_warning = QLabel("")
         self.lbl_warning.setStyleSheet(f"color: {TEXT_MUTED};")
@@ -89,6 +90,14 @@ class StressTrajectoryTab(QFrame):
         self.set_placeholder(
             "The stress trajectory will appear here after the evolution runs."
         )
+
+    def add_toolbar_widget(self, widget: QWidget) -> None:
+        """Insert an extra control into the axis-picker row, before the stretch.
+
+        Lets ``MainWindow`` drop the residual-source picker in here without
+        knowing this row's exact item order.
+        """
+        self._controls.insertWidget(self._controls.count() - 2, widget)
 
     def _picker(self, row: QHBoxLayout, title: str, role: str) -> QComboBox:
         label = QLabel(f"{title}:")

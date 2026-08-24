@@ -18,12 +18,14 @@ Everything here is pure numpy/polars/networkx so it can run on a worker thread.
 from __future__ import annotations
 
 from collections.abc import Callable
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 import networkx as nx
 import numpy as np
 import polars as pl
 
+from .af_fit import pooled_sigma
+from .af_models import ModelSpec, PanelFit, SigmaScope, detect_yield_scale, fit_panel
 from .cancellation import ComputationCancelled
 from .network import pivot_to_wide
 from .yield_curve import CurvePanel, NetworkKind, parse_term_years, sort_terms
@@ -143,16 +145,109 @@ def _fit_residuals_chunked(
     return np.vstack(matrices), dates
 
 
+def _canonical_maturity_values(canonical_terms: list[str]) -> np.ndarray:
+    """Maturities in years, derived exactly as ``extract_ns_residuals`` does.
+
+    Deliberately repeats that function's string surgery rather than calling
+    ``parse_term_years``, because ``_canonical_maturities`` formats labels with
+    ``%g`` and so rounds to six significant digits. Re-parsing the label is what
+    the legacy path sees, and any model compared against it must see the same
+    numbers -- for ``4W`` that is 0.0769231, not 0.07692307692307693.
+    """
+    return np.array(
+        [float(term.replace("Y", "").replace("p", ".")) for term in canonical_terms],
+        dtype=float,
+    )
+
+
+def _dense_rows(
+    wide: pl.DataFrame, date_column: str, terms: list[str]
+) -> tuple[list, np.ndarray]:
+    """Dates with a complete curve, and the matching yield matrix.
+
+    Applies exactly the row filter ``extract_ns_residuals`` applies -- drop any
+    date with a NaN at any requested tenor -- factored out so the legacy NS path
+    and the model path drop precisely the same dates and their residual cubes
+    stay comparable cell for cell.
+
+    Args:
+        wide: One issuer's curves, dates as rows.
+        date_column: Date column name.
+        terms: Term columns to read, in maturity order.
+
+    Returns:
+        ``(dates, yields)`` with ``yields`` of shape ``(n_kept, n_terms)``.
+    """
+    dates: list = []
+    rows: list[np.ndarray] = []
+    for row in wide.iter_rows(named=True):
+        values = np.array([row[term] for term in terms], dtype=float)
+        if np.any(np.isnan(values)):
+            continue
+        dates.append(row[date_column])
+        rows.append(values)
+    if not rows:
+        return [], np.empty((0, len(terms)), dtype=float)
+    return dates, np.vstack(rows)
+
+
+def _fit_residuals_model(
+    wide: pl.DataFrame,
+    date_column: str,
+    terms: list[str],
+    spec: ModelSpec,
+    on_chunk: Callable[[], None] | None,
+    **kwargs: object,
+) -> tuple[np.ndarray, list, PanelFit]:
+    """Fit one issuer's whole panel with the model named by ``spec``.
+
+    Unlike the per-date NS path this is a panel fit: the two-step estimator needs
+    the full date series to estimate the volatility matrix that drives the
+    yield adjustment. One consequence is that a failure here loses the issuer
+    rather than a single date -- which :func:`residual_cube` already handles by
+    routing it to ``skipped``.
+    """
+    canonical = _canonical_maturities(terms)
+    wide = wide.rename(canonical)
+    fit_terms = [canonical[t] for t in terms]
+    maturities = _canonical_maturity_values(fit_terms)
+
+    dates, yields = _dense_rows(wide, date_column, fit_terms)
+    if not dates:
+        empty = np.empty((0, len(terms)), dtype=float)
+        return (
+            empty,
+            [],
+            PanelFit(
+                residuals=empty,
+                factors=np.empty((0, 3), dtype=float),
+                decay=np.empty(0, dtype=float),
+                rmse=np.empty(0, dtype=float),
+                adjustment=np.zeros(len(terms), dtype=float),
+                sigma=np.zeros((3, 3), dtype=float),
+            ),
+        )
+
+    fit = fit_panel(maturities, yields, spec, on_chunk=on_chunk, **kwargs)
+    # Which tenors this issuer actually had. Panels are ragged, so a consumer
+    # cannot assume the adjustment lines up with the cube's union term axis.
+    fit.diagnostics["terms"] = list(terms)
+    fit.diagnostics["maturities"] = maturities.tolist()
+    return fit.residuals, dates, fit
+
+
 def residual_cube(
     long: pl.DataFrame,
     panel: CurvePanel,
     date_column: str,
     *,
     decay: float | None = 1.0,
+    model: ModelSpec | None = None,
+    fits_out: dict[str, PanelFit] | None = None,
     progress: ProgressCallback | None = None,
     status: StatusCallback | None = None,
 ) -> tuple[list[str], list, np.ndarray, list[str], list[str]]:
-    """Fit NS per issuer and align residuals onto shared dates.
+    """Fit a curve model per issuer and align residuals onto shared dates.
 
     Returns ``(issuers, dates, cube, terms, skipped)`` where ``cube`` has shape
     ``(n_issuers, n_dates, n_terms)``. Issuers whose curve cannot be fitted are
@@ -164,6 +259,20 @@ def residual_cube(
     late-starting or short-curve issuer truncate every network. Dropping is
     instead done per layer in :func:`build_residual_network`, where it costs
     only the layers that actually lack the data.
+
+    Args:
+        long: Long ``(date, issuer, term, rate)`` frame.
+        panel: Column-role assignment.
+        date_column: Date column name.
+        decay: Nelson-Siegel decay for the default path. Ignored when ``model``
+            is given, which carries its own ``decay``.
+        model: Which curve model to fit. ``None`` -- the default -- runs the
+            plain per-date Nelson-Siegel path unchanged, so every existing
+            caller and every published metric keeps its exact behaviour.
+        fits_out: If given, populated with the ``PanelFit`` per issuer. Only the
+            model path produces these; the legacy path leaves it empty.
+        progress: Per-issuer progress callback.
+        status: Human-readable status callback.
     """
     terms = sort_terms(long.get_column(panel.term_column).unique().to_list())
     if len(terms) < MIN_TERMS_FOR_NS:
@@ -172,49 +281,102 @@ def residual_cube(
             f"the current selection has {len(terms)}."
         )
 
+    if model is not None and model.yield_scale is None:
+        # Resolve the percent-versus-decimals question once, from the whole
+        # panel. Left to each issuer's own fit, a partly-negative curve is
+        # classified as decimals while its percent-quoted neighbours are not,
+        # and because the adjustment scales with the square of volatility the
+        # two then differ by a factor of 10,000.
+        model = replace(
+            model,
+            yield_scale=detect_yield_scale(
+                long.get_column(panel.rate_column).to_numpy()
+            ),
+        )
+        if status is not None:
+            unit = "percent" if model.yield_scale != 1.0 else "decimals"
+            status(f"NS: yields detected as {unit}")
+
     issuers = sorted(long.get_column(panel.issuer_column).unique().to_list())
     residuals: dict[str, np.ndarray] = {}
     used_terms: dict[str, list[str]] = {}
     used_dates: dict[str, list] = {}
+    fits: dict[str, PanelFit] = {}
     skipped: list[str] = []
 
-    total = max(len(issuers), 1)
-    for index, issuer in enumerate(issuers):
-        sub = long.filter(pl.col(panel.issuer_column) == issuer)
-        tick = (
-            (lambda i=index, s=issuer: progress(i, total, f"NS fit: {s}"))
-            if progress is not None
-            else None
-        )
-        try:
-            wide = pivot_to_wide(
-                sub,
-                date_column=date_column,
-                name_column=panel.term_column,
-                value_column=panel.rate_column,
+    def sweep(**extra: object) -> None:
+        """Fit every issuer once, recording results in the enclosing scope.
+
+        Run twice under the pooled volatility scope: the first pass supplies the
+        factor series the pooled Sigma is estimated from, the second refits every
+        issuer against the resulting common offset.
+        """
+        residuals.clear()
+        used_terms.clear()
+        used_dates.clear()
+        fits.clear()
+        skipped.clear()
+
+        total = max(len(issuers), 1)
+        for index, issuer in enumerate(issuers):
+            sub = long.filter(pl.col(panel.issuer_column) == issuer)
+            tick = (
+                (lambda i=index, s=issuer: progress(i, total, f"NS fit: {s}"))
+                if progress is not None
+                else None
             )
-            present = [t for t in terms if t in wide.columns]
-            if len(present) < MIN_TERMS_FOR_NS:
+            try:
+                wide = pivot_to_wide(
+                    sub,
+                    date_column=date_column,
+                    name_column=panel.term_column,
+                    value_column=panel.rate_column,
+                )
+                present = [t for t in terms if t in wide.columns]
+                if len(present) < MIN_TERMS_FOR_NS:
+                    skipped.append(issuer)
+                    continue
+                if model is None:
+                    matrix, fitted_dates = _fit_residuals_chunked(
+                        wide, date_column, present, decay, tick
+                    )
+                else:
+                    matrix, fitted_dates, fit = _fit_residuals_model(
+                        wide, date_column, present, model, tick, **extra
+                    )
+                    if fitted_dates:
+                        fits[issuer] = fit
+                if not fitted_dates:
+                    skipped.append(issuer)
+                    continue
+            except ComputationCancelled:
+                raise
+            except Exception as exc:  # noqa: BLE001 -- one bad issuer must not abort
+                if status is not None:
+                    status(f"NS: skipping {issuer} ({exc})")
                 skipped.append(issuer)
                 continue
-            matrix, fitted_dates = _fit_residuals_chunked(
-                wide, date_column, present, decay, tick
-            )
-            if not fitted_dates:
-                skipped.append(issuer)
-                continue
-        except ComputationCancelled:
-            raise
-        except Exception as exc:  # noqa: BLE001 -- one bad issuer must not abort
-            if status is not None:
-                status(f"NS: skipping {issuer} ({exc})")
-            skipped.append(issuer)
-            continue
-        residuals[issuer] = np.asarray(matrix, dtype=float)
-        used_terms[issuer] = present
-        used_dates[issuer] = fitted_dates
-        if progress is not None:
-            progress(index + 1, total, f"NS fit: {issuer}")
+            residuals[issuer] = np.asarray(matrix, dtype=float)
+            used_terms[issuer] = present
+            used_dates[issuer] = fitted_dates
+            if progress is not None:
+                progress(index + 1, total, f"NS fit: {issuer}")
+
+    sweep()
+
+    if (
+        model is not None
+        and model.sigma_scope is SigmaScope.POOLED
+        and model.model.is_arbitrage_free
+        and fits
+    ):
+        if status is not None:
+            status("NS: pooling volatility across issuers…")
+        shared = pooled_sigma(fits, model.dt, model.correlated_sigma)
+        sweep(sigma_override=shared)
+
+    if fits_out is not None:
+        fits_out.update(fits)
 
     if len(residuals) < 2:
         raise ValueError(
@@ -376,6 +538,8 @@ def compute_residual_networks(
     *,
     threshold: float = 0.3,
     decay: float | None = 1.0,
+    model: ModelSpec | None = None,
+    fits_out: dict[str, PanelFit] | None = None,
     progress: ProgressCallback | None = None,
     status: StatusCallback | None = None,
 ) -> ResidualNetworkResult:
@@ -384,15 +548,61 @@ def compute_residual_networks(
     For ``ISSUER_BY_TERM`` there is one network per maturity whose nodes are
     issuers; for ``TERM_BY_ISSUER`` one network per issuer whose nodes are
     maturities. Both read the same ``(issuer, date, term)`` residual cube.
+
+    See :func:`residual_cube` for ``decay``, ``model`` and ``fits_out``.
     """
     if status is not None:
         status("NS: fitting Nelson-Siegel residuals per issuer…")
     issuers, dates, cube, terms, skipped = residual_cube(
-        long, panel, date_column, decay=decay, progress=progress, status=status
+        long,
+        panel,
+        date_column,
+        decay=decay,
+        model=model,
+        fits_out=fits_out,
+        progress=progress,
+        status=status,
     )
     if status is not None:
         status(f"NS: {len(issuers)} issuers x {len(dates)} dates x {len(terms)} terms")
 
+    return _networks_from_cube(
+        issuers,
+        dates,
+        cube,
+        terms,
+        skipped,
+        long=long,
+        panel=panel,
+        kind=kind,
+        date_column=date_column,
+        threshold=threshold,
+        progress=progress,
+        status=status,
+    )
+
+
+def _networks_from_cube(
+    issuers: list[str],
+    dates: list,
+    cube: np.ndarray,
+    terms: list[str],
+    skipped: list[str],
+    *,
+    long: pl.DataFrame,
+    panel: CurvePanel,
+    kind: NetworkKind,
+    date_column: str,
+    threshold: float,
+    progress: ProgressCallback | None = None,
+    status: StatusCallback | None = None,
+) -> ResidualNetworkResult:
+    """Build every layer's network from an already-fitted residual cube.
+
+    Split out of :func:`compute_residual_networks` so a caller comparing several
+    models can fit each one once and reuse its cube, instead of paying for the
+    fit again per model.
+    """
     if kind is NetworkKind.ISSUER_BY_TERM:
         labels, nodes, label_column, node_label = (
             terms,

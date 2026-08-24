@@ -32,6 +32,12 @@ dependencies = [
 
 [project.optional-dependencies]
 ace = ["ace-cream"]
+# Only the experimental neural HJM residual model needs torch. Kept out of the
+# core so `uv sync` stays small; see ycn.analysis.af_neural.
+neural = ["torch>=2.5"]
+
+[dependency-groups]
+dev = ["pytest>=8.4", "pytest-cov>=7.0"]
 
 [project.scripts]
 ycn-gui = "ycn.gui.app:main"
@@ -48,3 +54,18 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/ycn"]
+
+[tool.black]
+# Pinned to the interpreter this project targets. Left unset, recent Black
+# assumes a newer Python than requires-python allows and its AST safety check
+# then refuses to verify the result.
+target-version = ["py313"]
+
+[tool.pytest.ini_options]
+minversion = "8.0"
+testpaths = ["tests"]
+addopts = "-ra --strict-markers --strict-config"
+markers = [
+    "slow: takes more than a second",
+    "neural: requires the `neural` extra (torch)",
+]

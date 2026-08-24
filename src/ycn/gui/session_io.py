@@ -22,11 +22,17 @@ from ycn.analysis.mln_evolution_viz import (
 )
 from ycn.analysis.mln_viz import render_mln_communities, render_mln_metrics
 from ycn.analysis.session import Session
-from ycn.gui.workers import MLNEvolutionResult, MLNResult, ResidualResult
+from ycn.gui.workers import (
+    MLNEvolutionResult,
+    MLNResult,
+    NeuralEvolutionResult,
+    ResidualResult,
+)
 
 MLN = "mln"
 RESIDUAL = "residual"
 EVOLUTION = "evolution"
+NEURAL_EVOLUTION = "neural_evolution"
 
 
 # ------------------------------------------------------------------- capture
@@ -80,6 +86,18 @@ def capture_evolution(session: Session, result: MLNEvolutionResult) -> None:
             f"{EVOLUTION}.factors": result.factors,
             f"{EVOLUTION}.regimes": result.regimes,
             f"{EVOLUTION}.stress": result.stress,
+        }
+    )
+
+
+def capture_neural_evolution(session: Session, result: NeuralEvolutionResult) -> None:
+    """Store a :class:`NeuralEvolutionResult` into ``session``."""
+    session.scalars[NEURAL_EVOLUTION] = {}
+    session.frames.update(
+        {
+            f"{NEURAL_EVOLUTION}.factors": result.factors,
+            f"{NEURAL_EVOLUTION}.regimes": result.regimes,
+            f"{NEURAL_EVOLUTION}.stress": result.stress,
         }
     )
 
@@ -194,6 +212,24 @@ def restore_evolution(session: Session) -> MLNEvolutionResult | None:
         regimes=regimes,
         stress=stress,
         links_fig=render_edge_evolution(edge_types, community_k),
+        factor_fig=render_factor_evolution(factors, regimes, std=False),
+        factor_std_fig=render_factor_evolution(factors, regimes, std=True),
+        stress_fig=render_stress_quadrants(stress),
+    )
+
+
+def restore_neural_evolution(session: Session) -> NeuralEvolutionResult | None:
+    """Rebuild the Neural-HJM evolution result, re-rendering its three figures."""
+    if NEURAL_EVOLUTION not in session.scalars:
+        return None
+    factors = session.frame(f"{NEURAL_EVOLUTION}.factors")
+    regimes = session.frame(f"{NEURAL_EVOLUTION}.regimes")
+    stress = session.frame(f"{NEURAL_EVOLUTION}.stress")
+
+    return NeuralEvolutionResult(
+        factors=factors,
+        regimes=regimes,
+        stress=stress,
         factor_fig=render_factor_evolution(factors, regimes, std=False),
         factor_std_fig=render_factor_evolution(factors, regimes, std=True),
         stress_fig=render_stress_quadrants(stress),

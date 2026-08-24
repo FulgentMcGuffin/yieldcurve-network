@@ -12,6 +12,7 @@ import networkx as nx
 from PySide6.QtCore import QObject, Signal, Slot
 import polars as pl
 
+from ycn.analysis.af_models import ModelSpec, ResidualModel
 from ycn.analysis.cancellation import ComputationCancelled
 from ycn.analysis.config import PipelineConfig
 from ycn.analysis.evolution import (
@@ -534,6 +535,26 @@ class MLNEvolutionResult:
     stress_fig: Figure
 
 
+@dataclass
+class NeuralEvolutionResult:
+    """Artifacts from the optional Neural-HJM evolution pass.
+
+    Deliberately shaped like the factor/regime/stress half of
+    :class:`MLNEvolutionResult` -- same field names, same meaning -- so the GUI
+    can swap between the two by which object it reads from, not by branching on
+    shape. There is no ``edge_types``/``community_k``/``links_fig`` here: the
+    multiplex structure itself does not depend on which curve model produced
+    the residuals, only the factor trajectory and the stress indicators do.
+    """
+
+    factors: pl.DataFrame
+    regimes: pl.DataFrame
+    stress: pl.DataFrame
+    factor_fig: Figure
+    factor_std_fig: Figure
+    stress_fig: Figure
+
+
 class ResidualWorker(_ThrottledProgressMixin, QObject):
     """Builds the NS residual networks off the UI thread.
 
@@ -724,3 +745,113 @@ class MLNEvolutionWorker(_ThrottledProgressMixin, QObject):
             self.cancelled.emit()
         except Exception as exc:  # noqa: BLE001
             self.failed.emit(f"Evolution analysis failed: {exc}")
+
+
+class NeuralEvolutionWorker(_ThrottledProgressMixin, QObject):
+    """Rolling-window factor and stress evolution under the Neural-HJM model.
+
+    Opt-in and gated on the NS evolution pass already being requested; runs
+    **after** :class:`MLNEvolutionWorker` finishes, not alongside it -- the
+    same reasoning as every stage in this chain: compute-bound Python gains
+    nothing from a second thread competing with the GUI for the interpreter,
+    and training one small network per issuer is the most CPU-heavy stage of
+    the four. Every status line is prefixed ``"Neural: "``.
+
+    Does not touch multiplex structure (edge composition, community *k*) --
+    that depends only on the connection measure, not on which curve model
+    produced the residuals, so it is computed once by ``MLNEvolutionWorker``
+    regardless of this stage running.
+    """
+
+    progress = Signal(int, int, str)
+    status = Signal(str)
+    finished = Signal(object)  # NeuralEvolutionResult
+    failed = Signal(str)
+    cancelled = Signal()
+
+    def __init__(
+        self,
+        config: PipelineConfig,
+        panel: CurvePanel,
+        evolution_config: EvolutionConfig,
+        *,
+        seed: int = 0,
+        cancel_event: threading.Event | None = None,
+    ) -> None:
+        super().__init__()
+        self._config = config
+        self._panel = panel
+        self._evolution_config = evolution_config
+        self._seed = seed
+        self._init_throttle(cancel_event)
+
+    @Slot()
+    def run(self) -> None:
+        try:
+            cfg, panel = self._config, self._panel
+            self._status_wrapper("Neural: loading panel...")
+            long = load_long_panel(cfg, panel)
+            if long.is_empty():
+                self.failed.emit("No rows remain for the Neural-HJM evolution.")
+                return
+
+            model = ModelSpec(ResidualModel.NEURAL_HJM, seed=self._seed)
+
+            # As in MLNEvolutionWorker: factors and stress are independent, so
+            # a failure in either must not discard the other.
+            factors = regimes = stress = pl.DataFrame()
+            try:
+                factors, regimes = compute_curve_factors(
+                    long,
+                    panel,
+                    cfg.date_column,
+                    model=model,
+                    window_size=self._evolution_config.window_size,
+                    step_size=self._evolution_config.step,
+                    status=self._status_wrapper,
+                )
+            except WorkerCancelled:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                self._status_wrapper(f"Neural: factor evolution skipped ({exc})")
+
+            try:
+                self._status_wrapper("Neural: computing correlation stress...")
+                _issuers, dates, cube, _terms, _skipped = residual_cube(
+                    long,
+                    panel,
+                    cfg.date_column,
+                    model=model,
+                    progress=self._progress_wrapper,
+                    status=self._status_wrapper,
+                )
+                stress = compute_stress_metrics(
+                    cube,
+                    dates,
+                    window_size=self._evolution_config.window_size,
+                    step_size=self._evolution_config.step,
+                )
+            except WorkerCancelled:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                self._status_wrapper(f"Neural: stress analysis skipped ({exc})")
+
+            if self._cancel_event.is_set():
+                raise WorkerCancelled()
+
+            self._status_wrapper("Neural: rendering figures...")
+            result = NeuralEvolutionResult(
+                factors=factors,
+                regimes=regimes,
+                stress=stress,
+                factor_fig=render_factor_evolution(factors, regimes, std=False),
+                factor_std_fig=render_factor_evolution(factors, regimes, std=True),
+                stress_fig=render_stress_quadrants(stress),
+            )
+            self._status_wrapper("Neural: complete.")
+            self.progress.emit(1, 1, "done")
+            self.finished.emit(result)
+        except WorkerCancelled:
+            self.cancelled.emit()
+        except Exception as exc:  # noqa: BLE001
+            self.failed.emit(f"Neural-HJM evolution failed: {exc}")

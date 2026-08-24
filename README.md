@@ -151,7 +151,7 @@ Only checked cells reach the network. The selection persists between openings, b
 
 ## Execution Model
 
-**Build network** runs three stages, each on its own worker thread, **one after the other**. Every tab in the window is filled by exactly one of them:
+**Build network** runs up to four stages, each on its own worker thread, **one after the other**. Every tab in the window is filled by exactly one of them:
 
 ```text
    Build network
@@ -170,16 +170,23 @@ Only checked cells reach the network. The selection persists between openings, b
         │
         ▼  only if "Run Evolution" is ticked
    ┌─────────────────────────┐  log "Evolution:"  ──▶  Evo: Links
-   │ 3. Evolution            │                    ──▶  Evo: NS
-   │    (opt-in, slowest)    │                    ──▶  Evo: Cov
-   └─────────────────────────┘                    ──▶  Evo: Cov(t)
+   │ 3. Evolution            │                    ──▶  Evo: Resids (NS)
+   │    (opt-in, slowest)    │                    ──▶  Evo: Cov (NS)
+   └─────────────────────────┘                    ──▶  Evo: Cov(t) (NS)
+        │
+        ▼  only if "Run Neural-HJM" is also ticked
+   ┌─────────────────────────┐  log "Neural:"     ──▶  Evo: Resids (Neural-HJM)
+   │ 4. Neural-HJM evolution │                    ──▶  Evo: Cov (Neural-HJM)
+   │    (opt-in, slowest)    │                    ──▶  Evo: Cov(t) (Neural-HJM)
+   └─────────────────────────┘
 ```
 
 | # | Stage | Gated by | Cost | Tabs it fills |
 |---|---|---|---|---|
 | 1 | **Multiplex** | always | `L × O(n_layer²)` measure evaluations | MLN · MLN: Metrics · MLN: Community |
 | 2 | **NS residuals** | always | one NS fit per `(issuer, date)` | NS Residuals |
-| 3 | **Evolution** | *Run Evolution* | stage 1 repeated per window, ×5 community methods | Evo: Links · Evo: NS · Evo: Cov · Evo: Cov(t) |
+| 3 | **Evolution** | *Run Evolution* | stage 1 repeated per window, ×5 community methods | Evo: Links · Evo: Resids · Evo: Cov · Evo: Cov(t) |
+| 4 | **Neural-HJM evolution** | *Run Evolution* **and** *Run Neural-HJM* | stage 3's factor/stress computations, refit under the Neural HJM model | Evo: Resids · Evo: Cov · Evo: Cov(t) (same three tabs, picked via the **Show** dropdown) |
 
 ### 1. Multiplex thread
 
@@ -200,16 +207,24 @@ Starts once the NS pass reports back, and only when **Run Evolution** is ticked.
 | Computation | Feeds |
 |---|---|
 | Rebuild the whole multiplex in every rolling window; track edge composition and the *k* chosen by each of the five methods | **Evo: Links** |
-| Nelson-Siegel factors of the market-average curve + Gaussian-mixture regimes | **Evo: NS** (*Factor* / *Factor Std*) |
-| Rolling stability of the residual correlation structure → stress indicators | **Evo: Cov**, **Evo: Cov(t)** |
+| Nelson-Siegel factors of the market-average curve + Gaussian-mixture regimes | **Evo: Resids** (*Factor* / *Factor Std*), NS side |
+| Rolling stability of the residual correlation structure → stress indicators | **Evo: Cov**, **Evo: Cov(t)**, NS side |
 
 Note that this stage builds **its own** NS residual cube for the stress computation rather than reusing stage 2's. The two are computed twice; sharing them is an obvious future saving.
 
 See [Network Evolution](#network-evolution).
 
+### 4. Neural-HJM evolution thread
+
+Opt-in on top of opt-in: starts once the NS evolution pass reports back (success or failure), and only when both **Run Evolution** and **Run Neural-HJM** are ticked. **Run Neural-HJM** lives in the same EVOLUTION widget group as **Run Evolution**, is disabled until that box is checked, and is greyed out entirely when the optional `neural` extra (`torch`) is not installed.
+
+It repeats the factor-trajectory and correlation-stress halves of stage 3 — *not* the multiplex rebuild, which does not depend on the curve model — fitting the experimental Neural HJM model jointly across the whole series instead of an independent Nelson-Siegel fit per date. This is the slowest stage of the four: it trains one small network per issuer.
+
+Feeds the same three tabs stage 3 does — **Evo: Resids**, **Evo: Cov**, **Evo: Cov(t)** — as a second, independently selectable dataset; see [the **Show** dropdown](#network-evolution) below.
+
 ### Why sequential, and what stays responsive
 
-The stages are queued rather than run in parallel on purpose. Both analysis stages are compute-bound and overwhelmingly *pure Python* — scipy curve fits and networkx traversals — so under the GIL running them together buys no throughput and adds a second thread competing with the one that has to repaint the window. Sequential costs the same wall time and lets the cheap stages land first.
+The stages are queued rather than run in parallel on purpose. All four stages are compute-bound and overwhelmingly *pure Python* — scipy curve fits, networkx traversals, and (for stage 4) small PyTorch training loops — so under the GIL running them together buys no throughput and adds a second thread competing with the one that has to repaint the window. Sequential costs the same wall time and lets the cheap stages land first.
 
 - Worker threads run at **low priority**, so the scheduler favours the GUI.
 - Long inner loops take a progress callback purely so they have frequent **cancellation checkpoints** and hand the GIL back; the NS fit is chunked into blocks of dates for exactly this reason.
@@ -333,7 +348,7 @@ This is [stage 2](#2-ns-residuals-thread): a single snapshot over the configured
 [Stage 3](#3-evolution-thread). Tick **Run Evolution** to rebuild the whole multiplex inside every rolling window and track how it changes. Four tabs:
 
 - **Evo: Links** — intra/inter edge counts and composition over time, and the community count *k* that each of the five k-selection methods picks per window. Because each window's *k* depends only on that window, there is no lookahead.
-- **Evo: NS** — *Factor* and *Factor Std* sub-tabs: Nelson-Siegel level, slope and curvature of the market-average curve and their within-window volatility, shaded by a Gaussian-mixture regime label.
+- **Evo: Resids** — *Factor* and *Factor Std* sub-tabs: level, slope and curvature of the market-average curve and their within-window volatility, shaded by a Gaussian-mixture regime label.
 - **Evo: Cov** — the four correlation-stress indicators, one per quadrant: average |correlation|, its variance, the count of strongly correlated pairs, and a 0–100 stress indicator.
 - **Evo: Cov(t)** — a dotted time trajectory through any two of those four series. Stressed windows (indicator > 50) are ringed and the endpoints are labelled. Selection is **bidirectional**: drag the date slider to walk a cursor along the path, or click a point on the chart to jump the slider to that date. The two axes can never carry the same series: picking the one already on the other axis swaps them.
 
@@ -341,7 +356,13 @@ All four tabs use the **window size and step from the Evolution Settings dialog*
 
 Bear in mind that the step controls cost as well as resolution: halving it doubles the number of multiplex rebuilds, and each rebuild is a full set of per-layer correlation matrices plus five community detections.
 
-This is much slower than a single multiplex — it is `n_windows` multiplex builds plus five community detections each — which is why it is opt-in and runs last.
+This is much slower than a single multiplex — it is `n_windows` multiplex builds plus five community detections each — which is why it is opt-in and runs after stage 2.
+
+### Switching curve models: the Show dropdown
+
+When [stage 4](#4-neural-hjm-evolution-thread) has also run (**Run Evolution** *and* **Run Neural-HJM** both ticked), **Evo: Resids**, **Evo: Cov** and **Evo: Cov(t)** each gain a **Show** dropdown: **NS Resids** / **Neural-HJM resids**. It selects which model's factor trajectory and stress indicators those three tabs display — the multiplex structure in **Evo: Links** is unaffected, since edge composition and community count depend only on the connection measure, not on which curve model produced the residuals.
+
+The three dropdowns stay in lock-step (changing one moves the others), "Neural-HJM resids" is disabled until that stage actually finishes, and the **eye button** always exports whichever dataset is currently shown.
 
 ## References
 

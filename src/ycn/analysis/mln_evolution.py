@@ -27,6 +27,7 @@ import networkx as nx
 import numpy as np
 import polars as pl
 
+from .af_models import ModelSpec, fit_panel
 from .evolution import CommunityMethod, EvolutionConfig, generate_windows
 from .mln import (
     MLNConfig,
@@ -36,6 +37,11 @@ from .mln import (
 )
 from .multilayer_communities import METHOD_LABELS, detect_multilayer_communities
 from .network import pivot_to_wide
+from .residual_networks import (
+    _canonical_maturities,
+    _canonical_maturity_values,
+    _dense_rows,
+)
 from .yield_curve import CurvePanel
 from .yield_curve_factors import (
     classify_yield_curve_regimes,
@@ -253,21 +259,27 @@ def compute_curve_factors(
     panel: CurvePanel,
     date_column: str,
     *,
+    model: ModelSpec | None = None,
     window_size: int = 30,
     step_size: int = 10,
     n_regimes: int = 3,
     status: StatusCallback | None = None,
 ) -> tuple[pl.DataFrame, pl.DataFrame]:
-    """Nelson-Siegel factor trajectories of the market-average curve.
+    """Factor trajectories of the market-average curve.
 
     The curve is averaged across issuers first, so this describes the market
     rather than any single issuer -- matching the notebook's ``ns_market``.
+    ``model=None`` -- the default -- fits plain Nelson-Siegel independently
+    per date, unchanged from before this function took a ``model`` argument.
+    A :class:`ModelSpec` instead fits that model **jointly across the whole
+    series** (``af_models.fit_panel`` treats the market-average curve as a
+    single-issuer panel), which is what lets a model with a genuinely
+    time-varying correction -- Neural HJM -- produce a factor trajectory that
+    differs from the Nelson-Siegel one, rather than a fixed relabelling of it.
+
     Returns ``(factors, regimes)``; ``regimes`` is empty when the mixture model
     cannot be fitted, which is not an error.
     """
-    if status is not None:
-        status("Evolution: fitting market-average Nelson-Siegel factors…")
-
     market = (
         long.group_by([date_column, panel.term_column])
         .agg(pl.col(panel.rate_column).mean().alias(panel.rate_column))
@@ -285,20 +297,47 @@ def compute_curve_factors(
             f"Nelson-Siegel needs at least 4 maturities; got {len(maturities)}."
         )
 
-    ns_market = fit_nelson_siegel_batch(
-        wide, date_col=date_column, maturities=maturities, decay=1.0
-    )
-    if ns_market.is_empty():
-        raise ValueError(
-            "Nelson-Siegel could not be fitted on any date. Every date needs a "
-            "complete market-average curve across the selected maturities."
+    if model is None:
+        if status is not None:
+            status("Evolution: fitting market-average Nelson-Siegel factors…")
+        ns_market = fit_nelson_siegel_batch(
+            wide, date_col=date_column, maturities=maturities, decay=1.0
         )
+        if ns_market.is_empty():
+            raise ValueError(
+                "Nelson-Siegel could not be fitted on any date. Every date "
+                "needs a complete market-average curve across the selected "
+                "maturities."
+            )
+        market_factors = ns_market.select([date_column, "level", "slope", "curvature"])
+    else:
+        if status is not None:
+            status(f"Evolution: fitting market-average {model.model.label} factors…")
+        canonical = _canonical_maturities(maturities)
+        canon_wide = wide.rename(canonical)
+        terms = [canonical[m] for m in maturities]
+        dates, yields = _dense_rows(canon_wide, date_column, terms)
+        if not dates:
+            raise ValueError(
+                "No date has a complete market-average curve across the "
+                "selected maturities."
+            )
+        fit = fit_panel(_canonical_maturity_values(terms), yields, model)
+        market_factors = pl.DataFrame(
+            {
+                date_column: dates,
+                "level": fit.factors[:, 0],
+                "slope": fit.factors[:, 1],
+                "curvature": fit.factors[:, 2],
+            }
+        )
+
     # compute_factor_trajectories selects a column literally named "date".
     if date_column != "date":
-        ns_market = ns_market.rename({date_column: "date"})
+        market_factors = market_factors.rename({date_column: "date"})
 
     stats = compute_factor_trajectories(
-        ns_market, window_size=window_size, step_size=step_size
+        market_factors, window_size=window_size, step_size=step_size
     )
     if not stats.get("windows"):
         raise ValueError(

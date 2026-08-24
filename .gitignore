@@ -252,3 +252,4 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
+data/ycs_afns_fake.duckdb

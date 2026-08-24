@@ -52,6 +52,7 @@ from matplotlib.backends.backend_qt5agg import FigureCanvas
 from matplotlib.figure import Figure
 import polars as pl
 
+from ycn.analysis.af_models import NEURAL_AVAILABLE, NEURAL_IMPORT_ERROR
 from ycn.analysis.config import PipelineConfig
 from ycn.analysis.data_access import (
     column_date_bounds,
@@ -100,9 +101,11 @@ from ycn.gui.ns_residuals_tab import NSResidualsTab
 from ycn.gui.session_io import (
     capture_evolution,
     capture_mln,
+    capture_neural_evolution,
     capture_residual,
     restore_evolution,
     restore_mln,
+    restore_neural_evolution,
     restore_residual,
     settings_summary,
 )
@@ -114,6 +117,8 @@ from ycn.gui.workers import (
     MLNEvolutionWorker,
     MLNResult,
     MLNWorker,
+    NeuralEvolutionResult,
+    NeuralEvolutionWorker,
     ResidualResult,
     ResidualWorker,
 )
@@ -203,7 +208,15 @@ class MainWindow(QMainWindow):
         self._evolution_worker: MLNEvolutionWorker | None = None
         self._evolution_worker_thread: QThread | None = None
         self._evolution_result: MLNEvolutionResult | None = None
+        self._neural_evolution_worker: NeuralEvolutionWorker | None = None
+        self._neural_evolution_worker_thread: QThread | None = None
+        self._neural_evolution_result: NeuralEvolutionResult | None = None
         self._active_stages: set[str] = set()
+        # "Evo: Resids"/"Evo: Cov"/"Evo: Cov(t)" each carry a picker choosing
+        # between the NS and Neural-HJM evolution results; they stay in sync
+        # via the same _syncing-guard idiom used by the other synced combos.
+        self._resid_source_pickers: list[QComboBox] = []
+        self._syncing_resid_source: bool = False
         # True while a saved session is being applied, so signal handlers that
         # would recompute or invalidate the restored state can stand down.
         self._loading_settings = False
@@ -423,6 +436,23 @@ class MainWindow(QMainWindow):
         )
         evolution_body.addWidget(self.btn_evolution_settings)
 
+        self.chk_neural_hjm = QCheckBox("Run Neural-HJM")
+        self.chk_neural_hjm.setToolTip(
+            "Also fit the experimental Neural HJM model (needs the 'neural' "
+            "extra) and compute its factor/stress evolution alongside the "
+            "Nelson-Siegel one. Only runs when 'Run Evolution' is also "
+            "ticked; adds a fourth, sequential analysis stage -- this is the "
+            "slowest of them, since it trains one small neural net per issuer."
+        )
+        evolution_body.addWidget(self.chk_neural_hjm)
+        if not NEURAL_AVAILABLE:
+            self.chk_neural_hjm.setEnabled(False)
+            self.chk_neural_hjm.setToolTip(
+                "Needs the optional 'neural' extra (uv sync --extra neural): "
+                f"{NEURAL_IMPORT_ERROR}"
+            )
+        self.chk_evolution.toggled.connect(self._on_evolution_checkbox_toggled)
+
         form.addSpacing(8)
         self.btn_run = QPushButton("Build network")
         self.btn_run.clicked.connect(self._run_mln)
@@ -520,21 +550,27 @@ class MainWindow(QMainWindow):
         self.evo_links_layout, links_page = self._figure_page()
         self.tabs.addTab(links_page, "Evo: Links")
 
-        # "Evo: NS" holds the two factor views as sub-tabs so they can be read
-        # against each other without another top-level tab each.
-        self.tabs_evo_ns = QTabWidget()
-        self.tabs_evo_ns.setObjectName("ResultTabs")
+        # "Evo: Resids" holds the two factor views as sub-tabs so they can be
+        # read against each other without another top-level tab each. When
+        # the Neural-HJM pass has also run, a picker above the sub-tabs lets
+        # the user switch which model's factors these (and the two Cov tabs)
+        # show; the picker only becomes selectable once that result exists.
+        self.tabs_evo_resids = QTabWidget()
+        self.tabs_evo_resids.setObjectName("ResultTabs")
         self.evo_factor_layout, factor_page = self._figure_page()
         self.evo_factor_std_layout, factor_std_page = self._figure_page()
-        self.tabs_evo_ns.addTab(factor_page, "Factor")
-        self.tabs_evo_ns.addTab(factor_std_page, "Factor Std")
-        self.tabs_evo_ns.currentChanged.connect(self._update_view_data_button)
-        self.tabs.addTab(self.tabs_evo_ns, "Evo: NS")
+        self.tabs_evo_resids.addTab(factor_page, "Factor")
+        self.tabs_evo_resids.addTab(factor_std_page, "Factor Std")
+        self.tabs_evo_resids.currentChanged.connect(self._update_view_data_button)
+        self.tabs.addTab(
+            self._wrap_with_source_picker(self.tabs_evo_resids), "Evo: Resids"
+        )
 
         self.evo_cov_layout, cov_page = self._figure_page()
-        self.tabs.addTab(cov_page, "Evo: Cov")
+        self.tabs.addTab(self._wrap_with_source_picker(cov_page), "Evo: Cov")
 
         self.tab_cov_t = StressTrajectoryTab()
+        self.tab_cov_t.add_toolbar_widget(self._make_source_picker())
         self.tabs.addTab(self.tab_cov_t, "Evo: Cov(t)")
 
         self._clear_evolution_tabs()
@@ -590,6 +626,98 @@ class MainWindow(QMainWindow):
             canvas.draw()
         except Exception as exc:  # noqa: BLE001
             self._append_log(f"Figure display error: {exc}")
+
+    # ---------------------------------------------------- residual source picker
+    def _make_source_picker(self) -> QComboBox:
+        """A combo choosing NS vs. Neural-HJM evolution results.
+
+        "Neural-HJM resids" starts disabled (there is nothing to show until
+        that stage has actually run) and every instance across the three
+        affected tabs stays in sync via ``_on_resid_source_changed``.
+        """
+        combo = QComboBox()
+        combo.addItem("NS Resids", "ns")
+        combo.addItem("Neural-HJM resids", "neural")
+        combo.model().item(1).setEnabled(False)
+        combo.setToolTip(
+            "Choose which curve model's factor/stress evolution these tabs "
+            "show. Neural-HJM resids only becomes available after a run with "
+            "both 'Run Evolution' and 'Run Neural-HJM' ticked."
+        )
+        combo.currentIndexChanged.connect(
+            lambda _i, c=combo: self._on_resid_source_changed(c)
+        )
+        self._resid_source_pickers.append(combo)
+        return combo
+
+    def _wrap_with_source_picker(self, content: QWidget) -> QWidget:
+        """Stack a source-picker row above an existing tab page."""
+        page = QFrame()
+        page.setObjectName("Canvas")
+        outer = QVBoxLayout(page)
+        outer.setContentsMargins(0, 0, 0, 0)
+        outer.setSpacing(4)
+
+        row = QHBoxLayout()
+        row.setContentsMargins(8, 6, 8, 0)
+        row.setSpacing(6)
+        label = QLabel("Show:")
+        label.setStyleSheet("color: #94a3b8;")
+        row.addWidget(label)
+        row.addWidget(self._make_source_picker())
+        row.addStretch(1)
+        outer.addLayout(row)
+        outer.addWidget(content, stretch=1)
+        return page
+
+    def _on_resid_source_changed(self, changed: QComboBox) -> None:
+        if self._syncing_resid_source:
+            return
+        source = changed.currentData()
+        self._syncing_resid_source = True
+        try:
+            for combo in self._resid_source_pickers:
+                if combo is not changed:
+                    index = combo.findData(source)
+                    if index >= 0:
+                        combo.blockSignals(True)
+                        combo.setCurrentIndex(index)
+                        combo.blockSignals(False)
+        finally:
+            self._syncing_resid_source = False
+        self._render_resid_source()
+
+    def _active_resid_source(self) -> str:
+        if not self._resid_source_pickers:
+            return "ns"
+        return self._resid_source_pickers[0].currentData()
+
+    def _set_neural_source_available(self, available: bool) -> None:
+        """Enable/disable "Neural-HJM resids" on every picker, and fall back."""
+        for combo in self._resid_source_pickers:
+            combo.model().item(1).setEnabled(available)
+        if not available:
+            for combo in self._resid_source_pickers:
+                combo.blockSignals(True)
+                combo.setCurrentIndex(0)
+                combo.blockSignals(False)
+        self._render_resid_source()
+
+    def _render_resid_source(self) -> None:
+        """Draw whichever evolution result the picker currently selects."""
+        source = self._active_resid_source()
+        result = (
+            self._neural_evolution_result
+            if source == "neural"
+            else self._evolution_result
+        )
+        if result is None:
+            return
+        self._show_figure(self.evo_factor_layout, result.factor_fig)
+        self._show_figure(self.evo_factor_std_layout, result.factor_std_fig)
+        self._show_figure(self.evo_cov_layout, result.stress_fig)
+        self.tab_cov_t.set_result(result.stress)
+        self._update_view_data_button()
 
     @staticmethod
     def _section(text: str) -> QLabel:
@@ -663,18 +791,26 @@ class MainWindow(QMainWindow):
             return title, residual.metrics
 
         evolution = self._evolution_result
-        if evolution is None:
-            return None
+        neural = self._neural_evolution_result
+
         if title == "Evo: Links":
-            return title, self._links_frame(evolution)
-        if title == "Evo: NS":
-            frame = self._factors_frame(evolution)
-            sub = self.tabs_evo_ns.tabText(self.tabs_evo_ns.currentIndex())
-            return f"{title} — {sub}", frame
-        if title in ("Evo: Cov", "Evo: Cov(t)"):
-            if evolution.stress.is_empty():
+            if evolution is None:
                 return None
-            return title, evolution.stress
+            return title, self._links_frame(evolution)
+
+        if title in ("Evo: Resids", "Evo: Cov", "Evo: Cov(t)"):
+            source = self._active_resid_source()
+            result = neural if source == "neural" else evolution
+            if result is None:
+                return None
+            label = "Neural-HJM resids" if source == "neural" else "NS Resids"
+            if title == "Evo: Resids":
+                frame = self._factors_frame(result)
+                sub = self.tabs_evo_resids.tabText(self.tabs_evo_resids.currentIndex())
+                return f"{title} — {label} — {sub}", frame
+            if result.stress.is_empty():
+                return None
+            return f"{title} — {label}", result.stress
         return None
 
     @staticmethod
@@ -694,8 +830,14 @@ class MainWindow(QMainWindow):
         return edges.join(wide.rename(renamed), on="window_idx", how="left")
 
     @staticmethod
-    def _factors_frame(result: MLNEvolutionResult) -> pl.DataFrame:
-        """Factor means and volatilities per window, with the regime label."""
+    def _factors_frame(
+        result: MLNEvolutionResult | NeuralEvolutionResult,
+    ) -> pl.DataFrame:
+        """Factor means and volatilities per window, with the regime label.
+
+        Duck-typed over either result -- both expose ``.factors``/``.regimes``
+        with identical shapes, so one helper serves whichever model is active.
+        """
         factors = result.factors
         if factors.is_empty() or result.regimes.is_empty():
             return factors
@@ -932,6 +1074,9 @@ class MainWindow(QMainWindow):
         # Evolution settings stay configurable ahead of the feature landing.
         self.btn_evolution_settings.setEnabled(enabled)
         self.chk_evolution.setEnabled(enabled)
+        self.chk_neural_hjm.setEnabled(
+            enabled and self.chk_evolution.isChecked() and NEURAL_AVAILABLE
+        )
         self.txt_filter_where.setEnabled(enabled and self.chk_filter_where.isChecked())
         if enabled and (
             self._db_path is None or self._panel is None or not self._panel.is_usable
@@ -1080,6 +1225,14 @@ class MainWindow(QMainWindow):
                 f"centrality={self._evolution_config.centrality}"
             )
 
+    def _on_evolution_checkbox_toggled(self, checked: bool) -> None:
+        """ "Run Neural-HJM" only makes sense once "Run Evolution" is ticked."""
+        self.chk_neural_hjm.setEnabled(
+            checked and NEURAL_AVAILABLE and self.chk_evolution.isEnabled()
+        )
+        if not checked:
+            self.chk_neural_hjm.setChecked(False)
+
     def _show_edge_settings(self) -> None:
         from ycn.gui.edge_settings_dialog import EdgeSettingsDialog
 
@@ -1131,6 +1284,7 @@ class MainWindow(QMainWindow):
             },
             "evolution": {
                 "enabled": self.chk_evolution.isChecked(),
+                "run_neural_hjm": self.chk_neural_hjm.isChecked(),
                 "window_size": self._evolution_config.window_size,
                 "step": self._evolution_config.step,
                 "expanding": self._evolution_config.expanding,
@@ -1270,6 +1424,11 @@ class MainWindow(QMainWindow):
                 self.chk_evolution.blockSignals(True)
                 self.chk_evolution.setChecked(bool(evo.get("enabled")))
                 self.chk_evolution.blockSignals(False)
+                self.chk_neural_hjm.blockSignals(True)
+                self.chk_neural_hjm.setChecked(
+                    bool(evo.get("run_neural_hjm")) and NEURAL_AVAILABLE
+                )
+                self.chk_neural_hjm.blockSignals(False)
         finally:
             self._loading_settings = False
 
@@ -1299,6 +1458,8 @@ class MainWindow(QMainWindow):
             capture_residual(session, self._residual_result)
         if self._evolution_result is not None:
             capture_evolution(session, self._evolution_result)
+        if self._neural_evolution_result is not None:
+            capture_neural_evolution(session, self._neural_evolution_result)
 
         try:
             written = save_session(path, session)
@@ -1366,12 +1527,10 @@ class MainWindow(QMainWindow):
         self._evolution_result = restore_evolution(session)
         if self._evolution_result is not None:
             self._show_figure(self.evo_links_layout, self._evolution_result.links_fig)
-            self._show_figure(self.evo_factor_layout, self._evolution_result.factor_fig)
-            self._show_figure(
-                self.evo_factor_std_layout, self._evolution_result.factor_std_fig
-            )
-            self._show_figure(self.evo_cov_layout, self._evolution_result.stress_fig)
-            self.tab_cov_t.set_result(self._evolution_result.stress)
+
+        self._neural_evolution_result = restore_neural_evolution(session)
+        self._set_neural_source_available(self._neural_evolution_result is not None)
+        self._render_resid_source()
 
         self._set_controls_enabled(True)
         self._update_view_data_button()
@@ -1387,7 +1546,12 @@ class MainWindow(QMainWindow):
     def _has_results(self) -> bool:
         return any(
             r is not None
-            for r in (self._mln_result, self._residual_result, self._evolution_result)
+            for r in (
+                self._mln_result,
+                self._residual_result,
+                self._evolution_result,
+                self._neural_evolution_result,
+            )
         )
 
     def _refresh_save_enabled(self) -> None:
@@ -1558,6 +1722,8 @@ class MainWindow(QMainWindow):
             # Reserved now, started when the residual pass reports back, so the
             # run does not look finished in between.
             self._active_stages.add("evolution")
+            if self.chk_neural_hjm.isChecked() and NEURAL_AVAILABLE:
+                self._active_stages.add("neural_evolution")
             self._set_evolution_building()
         else:
             self._clear_evolution_tabs(
@@ -1626,6 +1792,44 @@ class MainWindow(QMainWindow):
             self._on_evolution_finished,
             self._on_evolution_failed,
             self._on_evolution_cancelled,
+        )
+
+    def _start_neural_evolution_if_pending(self) -> None:
+        """Begin the Neural-HJM pass, once the NS evolution pass has finished.
+
+        Called from both the NS evolution finish and failure handlers: a
+        failed NS pass must not silently cancel this one, mirroring how the
+        residual pass's failure does not cancel evolution.
+        """
+        if "neural_evolution" not in self._active_stages:
+            return
+        if self._neural_evolution_worker is not None or self._cancel_event.is_set():
+            return
+        if self._last_config is None or self._panel is None:
+            self._stage_done("neural_evolution")
+            return
+
+        panel = self._panel
+        self._sync_evolution_from_sidebar()
+        self._append_log(
+            f"Neural-HJM evolution: window={self._evolution_config.window_size}, "
+            f"step={self._evolution_config.step}"
+        )
+        self._neural_evolution_worker_thread = QThread(self)
+        self._neural_evolution_worker = NeuralEvolutionWorker(
+            self._last_config,
+            panel,
+            self._evolution_config,
+            cancel_event=self._cancel_event,
+        )
+        self._wire_stage(
+            self._neural_evolution_worker,
+            self._neural_evolution_worker_thread,
+            self._on_neural_evolution_progress,
+            self._on_neural_evolution_status,
+            self._on_neural_evolution_finished,
+            self._on_neural_evolution_failed,
+            self._on_neural_evolution_cancelled,
         )
 
     @staticmethod
@@ -1732,10 +1936,7 @@ class MainWindow(QMainWindow):
             return
         self._evolution_result = result
         self._show_figure(self.evo_links_layout, result.links_fig)
-        self._show_figure(self.evo_factor_layout, result.factor_fig)
-        self._show_figure(self.evo_factor_std_layout, result.factor_std_fig)
-        self._show_figure(self.evo_cov_layout, result.stress_fig)
-        self.tab_cov_t.set_result(result.stress)
+        self._render_resid_source()
         self._append_log(
             f"Evolution rendered: {result.edge_types.height} window(s), "
             f"{result.factors.height} factor window(s), "
@@ -1745,6 +1946,7 @@ class MainWindow(QMainWindow):
         self._evolution_worker_thread = None
         self._update_view_data_button()
         self._stage_done("evolution")
+        self._start_neural_evolution_if_pending()
 
     def _on_evolution_failed(self, message: str) -> None:
         if self._is_stale(self._evolution_worker):
@@ -1755,12 +1957,62 @@ class MainWindow(QMainWindow):
         self._evolution_worker_thread = None
         self._update_view_data_button()
         self._stage_done("evolution")
+        self._start_neural_evolution_if_pending()
 
     def _on_evolution_cancelled(self) -> None:
         if self._is_stale(self._evolution_worker):
             return
         self._evolution_worker = None
         self._evolution_worker_thread = None
+
+    # ------------------------------------------------------ neural evolution signals
+    def _on_neural_evolution_progress(self, done: int, total: int, desc: str) -> None:
+        if self._is_stale(self._neural_evolution_worker) or total <= 0:
+            return
+        self.progress.setValue(int(100 * done / total))
+        self.lbl_status.setText(f"Neural: {desc}")
+
+    def _on_neural_evolution_status(self, message: str) -> None:
+        if self._is_stale(self._neural_evolution_worker):
+            return
+        self.lbl_status.setText(message)
+        self._append_log(message)
+
+    def _on_neural_evolution_finished(self, result: object) -> None:
+        if self._is_stale(self._neural_evolution_worker):
+            return
+        if not isinstance(result, NeuralEvolutionResult):
+            self._on_neural_evolution_failed(
+                f"Unexpected Neural-HJM result: {type(result)!r}"
+            )
+            return
+        self._neural_evolution_result = result
+        self._set_neural_source_available(True)
+        self._append_log(
+            f"Neural-HJM evolution rendered: {result.factors.height} factor "
+            f"window(s), {result.stress.height} stress window(s)."
+        )
+        self._neural_evolution_worker = None
+        self._neural_evolution_worker_thread = None
+        self._update_view_data_button()
+        self._stage_done("neural_evolution")
+
+    def _on_neural_evolution_failed(self, message: str) -> None:
+        if self._is_stale(self._neural_evolution_worker):
+            return
+        self._append_log(f"NEURAL-HJM ERROR: {message}")
+        self._neural_evolution_result = None
+        self._set_neural_source_available(False)
+        self._neural_evolution_worker = None
+        self._neural_evolution_worker_thread = None
+        self._update_view_data_button()
+        self._stage_done("neural_evolution")
+
+    def _on_neural_evolution_cancelled(self) -> None:
+        if self._is_stale(self._neural_evolution_worker):
+            return
+        self._neural_evolution_worker = None
+        self._neural_evolution_worker_thread = None
 
     # ------------------------------------------------------ evolution canvases
     def _evolution_placeholder(self, layout: QVBoxLayout, message: str) -> None:
@@ -1778,6 +2030,8 @@ class MainWindow(QMainWindow):
             self._evolution_placeholder(layout, text)
         self.tab_cov_t.set_placeholder(text)
         self._evolution_result = None
+        self._neural_evolution_result = None
+        self._set_neural_source_available(False)
         self._update_view_data_button()
 
     def _set_evolution_building(self) -> None:
@@ -1856,6 +2110,7 @@ class MainWindow(QMainWindow):
             (self._mln_worker_thread, "MLN"),
             (self._residual_worker_thread, "NS residuals"),
             (self._evolution_worker_thread, "Evolution"),
+            (self._neural_evolution_worker_thread, "Neural-HJM"),
         ):
             if thread is None or not thread.isRunning():
                 continue
@@ -1871,11 +2126,16 @@ class MainWindow(QMainWindow):
         self._retire_worker(self._mln_worker, self._mln_worker_thread)
         self._retire_worker(self._residual_worker, self._residual_worker_thread)
         self._retire_worker(self._evolution_worker, self._evolution_worker_thread)
+        self._retire_worker(
+            self._neural_evolution_worker, self._neural_evolution_worker_thread
+        )
         self._cleanup_mln_worker()
         self._residual_worker = None
         self._residual_worker_thread = None
         self._evolution_worker = None
         self._evolution_worker_thread = None
+        self._neural_evolution_worker = None
+        self._neural_evolution_worker_thread = None
         self._active_stages.clear()
 
         self._clear_mln_tabs("Render cancelled.")
@@ -2231,6 +2491,7 @@ class MainWindow(QMainWindow):
             self._mln_worker_thread,
             self._residual_worker_thread,
             self._evolution_worker_thread,
+            self._neural_evolution_worker_thread,
         ):
             if thread is not None and thread.isRunning():
                 thread.quit()
