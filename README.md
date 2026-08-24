@@ -220,6 +220,8 @@ Opt-in on top of opt-in: starts once the NS evolution pass reports back (success
 
 It repeats the factor-trajectory and correlation-stress halves of stage 3 — *not* the multiplex rebuild, which does not depend on the curve model — fitting the experimental Neural HJM model jointly across the whole series instead of an independent Nelson-Siegel fit per date. This is the slowest stage of the four: it trains one small network per issuer.
 
+Every message this stage logs is prefixed `"Neural:"`. Because there is no per-window loop to report progress through (unlike stage 3's multiplex rebuild), it instead logs one line per issuer as its fit starts, plus a training checkpoint every 25 epochs for both the per-issuer fits and the market-average factor fit — so a slow run still shows continuous, specific progress in the process log rather than several minutes of silence between the stage's start and end messages.
+
 Feeds the same three tabs stage 3 does — **Evo: Resids**, **Evo: Cov**, **Evo: Cov(t)** — as a second, independently selectable dataset; see [the **Show** dropdown](#network-evolution) below.
 
 ### Why sequential, and what stays responsive
@@ -274,7 +276,7 @@ Layers may share few nodes, or none — that is a property of the data, not a fa
 | **Centrality measure** | eigenvector | Centrality shown in the node × layer heatmap: `eigenvector`, `betweenness`, or `degree` |
 | **Jaccard similarity** | 0.60 | Minimum member overlap for two per-layer communities to be treated as the *same* community across layers |
 | **Community method** | fixed | k-selection strategy per layer (see below) |
-| **Max communities** | 10 | For `fixed`: exact k per layer. For the optimisation methods: upper bound of the search. |
+| **Max communities** | 10 | For `fixed`: exact k per layer. For the optimisation methods: upper bound of the search. Also the ceiling on the total distinct communities **MLN: Community** shows after cross-layer alignment — see below. |
 
 Alongside it, the main sidebar carries the **connection measure** (plus measure-specific **Edge Settings**, e.g. the stress-regime quantile for conditional correlation), the **transforms**, the **date range**, and the **independence threshold** (default 0.33 — keep edges where the measure ≥ threshold).
 
@@ -296,6 +298,8 @@ The **Jaccard threshold** repairs this. After detection, each layer's communitie
 
 The consequence is that **a colour means the same group of nodes in every layer**, which is the only thing that makes the community heatmap readable across columns. Raise the threshold to demand stronger evidence before declaring two communities equivalent (yielding more, finer communities); lower it to merge more aggressively.
 
+Per-layer detection is independent, so without a further check a long run of poorly-overlapping layers could mint far more *aligned* ids than **Max communities** allows — each layer only respects that cap for its own cluster count. **Max communities** therefore also caps the total distinct ids handed out across the whole alignment: once the budget is spent, the largest unmatched clusters still get their own id first, and anything left over attaches to whichever existing community it resembles most, even below the Jaccard threshold, rather than spawning an unbounded number of new ones.
+
 ### The MLN Tabs
 
 These three are filled by [stage 1](#1-multiplex-thread).
@@ -306,7 +310,7 @@ An interactive Plotly view: one translucent plane per layer, nodes arranged on a
 
 - **Rotate, pan and zoom** the stack directly.
 - **Hover** any node or edge for its identity, layer and weight.
-- **Visible layers** checklist toggles layers in and out. Re-rendering reuses the already-computed multiplex, so toggling is immediate and never recomputes the networks.
+- **Visible layers** checklist toggles layers in and out. Re-rendering reuses the already-computed multiplex, so toggling is immediate and never recomputes the networks. The checked subset is remembered across a rebuild (e.g. re-running just to also tick "Run Evolution") and restored rather than reset to "all checked", as long as the same layer values reappear.
 - **Node table** beside the view lists every `(node, layer)` pair; clicking a node in the 3D graph selects and scrolls to its row.
 
 #### MLN: Metrics
@@ -318,6 +322,8 @@ An inter-layer edge touches two layers and is therefore counted under both in th
 #### MLN: Community
 
 The node × layer community heatmap, coloured by the **Jaccard-aligned global community ID**. Reading across a row shows whether a node keeps its community across layers; reading down a column shows how a layer partitions.
+
+Colours come from a 10-colour curated palette that matches the notebooks, extended automatically (via `tab20`/`tab20b`, then a sampled continuous colormap as a last resort) whenever there are more communities than that to distinguish — so raising **Max communities** past 10 does not start repeating colours across unrelated communities.
 
 ### Performance Considerations
 

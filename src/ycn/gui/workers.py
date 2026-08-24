@@ -809,6 +809,7 @@ class NeuralEvolutionWorker(_ThrottledProgressMixin, QObject):
                     window_size=self._evolution_config.window_size,
                     step_size=self._evolution_config.step,
                     status=self._status_wrapper,
+                    log_prefix="Neural",
                 )
             except WorkerCancelled:
                 raise
@@ -824,6 +825,7 @@ class NeuralEvolutionWorker(_ThrottledProgressMixin, QObject):
                     model=model,
                     progress=self._progress_wrapper,
                     status=self._status_wrapper,
+                    log_prefix="Neural",
                 )
                 stress = compute_stress_metrics(
                     cube,

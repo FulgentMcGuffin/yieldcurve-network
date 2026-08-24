@@ -35,6 +35,26 @@ GRID = "#334155"
 MAX_NODE_TICKS = 60
 
 
+def _community_palette(n: int) -> list:
+    """``n`` visually distinct colours for a categorical community legend.
+
+    ``CATEGORICAL_10`` is curated and covers the common case (it also matches
+    the notebook), but ``MLNConfig.max_communities`` allows up to 15, and a
+    stale session or an unbounded aligner could hand back more still -- cycling
+    ``CATEGORICAL_10`` past 10 communities repeats colours, which reads as
+    *fewer* communities than there are. Matplotlib's ``tab20``/``tab20b`` give
+    40 combined qualitative colours before this falls back to sampling a
+    continuous colormap, which stays distinct-*ish* rather than repeating.
+    """
+    if n <= len(CATEGORICAL_10):
+        return CATEGORICAL_10[:n]
+    extended = list(colormaps["tab20"].colors) + list(colormaps["tab20b"].colors)
+    if n <= len(extended):
+        return extended[:n]
+    cmap = colormaps["gist_ncar"]
+    return [cmap(i / max(1, n - 1)) for i in range(n)]
+
+
 def _empty(message: str, width: int, height: int, dpi: int) -> Figure:
     fig = Figure(figsize=(width, height), dpi=dpi)
     ax = fig.add_subplot(111)
@@ -313,7 +333,7 @@ def render_mln_communities(
     present = sorted({int(v) for v in matrix[~np.isnan(matrix)]})
     if not present:
         return _empty("No community data available", width, height, dpi)
-    colors = [CATEGORICAL_10[i % len(CATEGORICAL_10)] for i in range(len(present))]
+    colors = _community_palette(len(present))
     remap = {cid: i for i, cid in enumerate(present)}
     indexed = np.full(matrix.shape, np.nan)
     for cid, i in remap.items():

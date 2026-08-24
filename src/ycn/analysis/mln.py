@@ -45,7 +45,9 @@ class MLNConfig:
         jaccard_threshold: Minimum Jaccard overlap for two per-layer
             communities to be considered the same community across layers.
         community_method: k-selection strategy, per layer.
-        max_communities: Exact k for FIXED; search upper bound otherwise.
+        max_communities: Exact k for FIXED; search upper bound otherwise. Also
+            the ceiling on the total distinct ids the MLN: Community tab shows
+            after cross-layer alignment (see ``layer_community_matrix``).
         min_nodes: Layers with fewer nodes are skipped for community detection.
     """
 
@@ -325,7 +327,9 @@ def layer_community_matrix(
     Per-layer ASE + KMeans (k chosen by ``cfg.community_method``, capped by
     ``cfg.max_communities``), then Jaccard alignment so a community id means the
     same group of nodes in every layer -- that is what makes the heatmap's
-    colours comparable across layers.
+    colours comparable across layers. ``cfg.max_communities`` also bounds the
+    *total* distinct ids the alignment step hands out, not just each layer's own
+    cluster count -- see ``align_community_labels``.
     """
     ordered = {
         layer: layer_graphs[layer] for layer in layer_values if layer in layer_graphs
@@ -337,7 +341,10 @@ def layer_community_matrix(
         min_nodes=cfg.min_nodes,
     )
     aligned = align_community_labels(
-        raw, list(ordered.keys()), min_jaccard=cfg.jaccard_threshold
+        raw,
+        list(ordered.keys()),
+        min_jaccard=cfg.jaccard_threshold,
+        max_ids=cfg.max_communities,
     )
     rows = [
         {"node": str(node), "layer": layer, "community": int(label)}

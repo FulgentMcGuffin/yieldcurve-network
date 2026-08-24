@@ -246,6 +246,7 @@ def residual_cube(
     fits_out: dict[str, PanelFit] | None = None,
     progress: ProgressCallback | None = None,
     status: StatusCallback | None = None,
+    log_prefix: str | None = None,
 ) -> tuple[list[str], list, np.ndarray, list[str], list[str]]:
     """Fit a curve model per issuer and align residuals onto shared dates.
 
@@ -273,6 +274,11 @@ def residual_cube(
             model path produces these; the legacy path leaves it empty.
         progress: Per-issuer progress callback.
         status: Human-readable status callback.
+        log_prefix: Tag for the per-issuer status lines a model-based fit emits
+            (e.g. ``"Neural"``). Defaults to the model's own label, which reads
+            fine standalone but does not match a caller whose other messages
+            use a shorter, worker-specific tag (see ``mln_evolution.compute_
+            curve_factors``'s identically-named parameter).
     """
     terms = sort_terms(long.get_column(panel.term_column).unique().to_list())
     if len(terms) < MIN_TERMS_FOR_NS:
@@ -318,13 +324,24 @@ def residual_cube(
         skipped.clear()
 
         total = max(len(issuers), 1)
+        fit_label = model.model.label if model is not None else "NS"
+        status_tag = log_prefix if log_prefix is not None else fit_label
         for index, issuer in enumerate(issuers):
             sub = long.filter(pl.col(panel.issuer_column) == issuer)
             tick = (
-                (lambda i=index, s=issuer: progress(i, total, f"NS fit: {s}"))
+                (lambda i=index, s=issuer: progress(i, total, f"{fit_label} fit: {s}"))
                 if progress is not None
                 else None
             )
+            if model is not None and status is not None:
+                # The per-date NS path is fast enough that per-issuer status
+                # would just be log noise; a model-based fit (AFNS, and
+                # especially one that trains a small network per issuer, like
+                # Neural HJM) is slow enough per issuer that this is the only
+                # thing standing between the process log and several minutes
+                # of apparent silence -- the same reason the evolution loop
+                # reports a status line per window rather than just progress.
+                status(f"{status_tag}: fitting {issuer} ({index + 1}/{total})")
             try:
                 wide = pivot_to_wide(
                     sub,

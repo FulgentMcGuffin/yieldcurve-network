@@ -22,6 +22,7 @@ from __future__ import annotations
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import date, datetime
+from itertools import count
 
 import networkx as nx
 import numpy as np
@@ -264,6 +265,7 @@ def compute_curve_factors(
     step_size: int = 10,
     n_regimes: int = 3,
     status: StatusCallback | None = None,
+    log_prefix: str = "Evolution",
 ) -> tuple[pl.DataFrame, pl.DataFrame]:
     """Factor trajectories of the market-average curve.
 
@@ -277,8 +279,13 @@ def compute_curve_factors(
     time-varying correction -- Neural HJM -- produce a factor trajectory that
     differs from the Nelson-Siegel one, rather than a fixed relabelling of it.
 
-    Returns ``(factors, regimes)``; ``regimes`` is empty when the mixture model
-    cannot be fitted, which is not an error.
+    ``log_prefix`` tags every status line this function emits (default
+    ``"Evolution"``, matching the NS evolution worker); pass ``"Neural"`` when
+    called from the Neural-HJM worker so the process log stays as clearly
+    attributed as it already is for the rest of that stage. A model-based fit
+    also reports a checkpoint every 25 training epochs -- otherwise the market
+    curve's fit, unlike the fast per-date NS path, gives no sign of life until
+    it finishes.
     """
     market = (
         long.group_by([date_column, panel.term_column])
@@ -299,7 +306,7 @@ def compute_curve_factors(
 
     if model is None:
         if status is not None:
-            status("Evolution: fitting market-average Nelson-Siegel factors…")
+            status(f"{log_prefix}: fitting market-average Nelson-Siegel factors…")
         ns_market = fit_nelson_siegel_batch(
             wide, date_col=date_column, maturities=maturities, decay=1.0
         )
@@ -312,7 +319,7 @@ def compute_curve_factors(
         market_factors = ns_market.select([date_column, "level", "slope", "curvature"])
     else:
         if status is not None:
-            status(f"Evolution: fitting market-average {model.model.label} factors…")
+            status(f"{log_prefix}: fitting market-average {model.model.label} factors…")
         canonical = _canonical_maturities(maturities)
         canon_wide = wide.rename(canonical)
         terms = [canonical[m] for m in maturities]
@@ -322,7 +329,20 @@ def compute_curve_factors(
                 "No date has a complete market-average curve across the "
                 "selected maturities."
             )
-        fit = fit_panel(_canonical_maturity_values(terms), yields, model)
+        checkpoints = count(1)
+        on_chunk = (
+            (
+                lambda: status(
+                    f"{log_prefix}: market-average {model.model.label} fit "
+                    f"in progress (checkpoint {next(checkpoints)})…"
+                )
+            )
+            if status is not None
+            else None
+        )
+        fit = fit_panel(
+            _canonical_maturity_values(terms), yields, model, on_chunk=on_chunk
+        )
         market_factors = pl.DataFrame(
             {
                 date_column: dates,

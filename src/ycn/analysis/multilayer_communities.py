@@ -168,6 +168,7 @@ def align_community_labels(
     layers: Sequence[str],
     *,
     min_jaccard: float = 0.5,
+    max_ids: int | None = None,
 ) -> dict[str, dict[str, int]]:
     """Relabel per-layer clusters so overlapping groups keep a stable id.
 
@@ -176,10 +177,22 @@ def align_community_labels(
     leftover clusters receive a new id. Canonical prototypes are the
     founding member sets, so a group that splits and later reforms keeps
     its original label.
+
+    ``max_ids`` bounds the total distinct ids handed out across *all* layers
+    combined, not just the per-layer cluster count each layer was detected
+    with. Per-layer detection is independent (see ``detect_layer_communities``),
+    so without this a poorly-overlapping sequence of layers can mint far more
+    aligned ids than any single layer ever had -- silently ignoring the
+    "max communities" setting the caller configured. Once the budget is spent,
+    a leftover cluster attaches to whichever canonical group it resembles most
+    (even below ``min_jaccard``) instead of minting a new id.
     """
     aligned: dict[str, dict[str, int]] = {}
     canonical: dict[int, set[str]] = {}
     next_id = 0
+
+    def _budget_left() -> bool:
+        return max_ids is None or len(canonical) < max_ids
 
     for layer in layers:
         raw = dict(communities.get(layer) or {})
@@ -189,10 +202,26 @@ def align_community_labels(
             continue
 
         if not canonical:
-            for cid, members in groups.items():
-                canonical[cid] = set(members)
+            # Founding layer: largest groups claim the (possibly capped) id
+            # budget first, so a handful of small clusters never crowd out a
+            # genuinely large community.
+            by_size = sorted(groups, key=lambda cid: -len(groups[cid]))
+            mapping: dict[int, int] = {}
+            for cid in by_size:
+                if not _budget_left():
+                    break
+                canonical[cid] = set(groups[cid])
+                mapping[cid] = cid
                 next_id = max(next_id, cid + 1)
-            aligned[layer] = raw
+            for cid in by_size:
+                if cid in mapping:
+                    continue
+                best_cid = max(
+                    canonical, key=lambda c: _jaccard(groups[cid], canonical[c])
+                )
+                canonical[best_cid] |= groups[cid]
+                mapping[cid] = best_cid
+            aligned[layer] = {node: mapping[cid] for node, cid in raw.items()}
             continue
 
         old_ids = sorted(groups)
@@ -202,18 +231,30 @@ def align_community_labels(
             for j, cid in enumerate(can_ids):
                 cost[i, j] = 1.0 - _jaccard(groups[oid], canonical[cid])
 
-        mapping: dict[int, int] = {}
+        mapping = {}
         row_ind, col_ind = linear_sum_assignment(cost)
         for row, col in zip(row_ind, col_ind):
             if (1.0 - cost[row, col]) >= min_jaccard:
                 mapping[old_ids[row]] = can_ids[col]
 
-        for oid in old_ids:
-            if oid in mapping:
+        # Unmatched groups: the largest earn a new id first (while the budget
+        # allows), the rest attach to whichever canonical group they resemble
+        # most, even below min_jaccard, rather than being dropped.
+        unresolved = sorted(
+            (oid for oid in old_ids if oid not in mapping),
+            key=lambda o: -len(groups[o]),
+        )
+        for oid in unresolved:
+            if _budget_left():
+                mapping[oid] = next_id
+                canonical[next_id] = set(groups[oid])
+                next_id += 1
                 continue
-            mapping[oid] = next_id
-            canonical[next_id] = set(groups[oid])
-            next_id += 1
+            i = old_ids.index(oid)
+            best_j = int(np.argmin(cost[i]))
+            best_cid = can_ids[best_j]
+            mapping[oid] = best_cid
+            canonical[best_cid] |= set(groups[oid])
 
         aligned[layer] = {node: mapping[cid] for node, cid in raw.items()}
 

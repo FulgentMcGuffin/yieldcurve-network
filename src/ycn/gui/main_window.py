@@ -198,6 +198,10 @@ class MainWindow(QMainWindow):
         self._mln_row_of: dict[tuple[str, str], int] = {}
         self._mln_bridge = MLNBridge()
         self._mln_channel: QWebChannel | None = None
+        # Which layer values were checked in "VISIBLE LAYERS" last time, so a
+        # rebuild (e.g. just to also tick Run Evolution) restores it instead of
+        # silently re-checking everything. None means "no prior choice yet".
+        self._visible_layers: set[str] | None = None
 
         # Residual and evolution stages run concurrently after the multiplex
         # lands. ``_active_stages`` is what keeps the busy state honest: the
@@ -948,6 +952,7 @@ class MainWindow(QMainWindow):
         self.cmb_date.blockSignals(False)
 
         self._reset_cell_mask()
+        self._visible_layers = None
         self._refresh_panel()
         self._guess_date_range()
         self._append_log(f"Selected table {table!r} ({len(columns)} columns).")
@@ -957,6 +962,7 @@ class MainWindow(QMainWindow):
         if self._loading_settings:
             return
         self._reset_cell_mask()
+        self._visible_layers = None
         self._refresh_panel()
         self._guess_date_range()
 
@@ -2360,15 +2366,33 @@ class MainWindow(QMainWindow):
 
     # ------------------------------------------------------- MLN interactivity
     def _populate_mln_layer_list(self, result: MLNResult) -> None:
-        """Fill the visible-layers checklist (all layers checked initially)."""
+        """Fill the visible-layers checklist.
+
+        Restores whichever subset was checked last time, when the same layer
+        values reappear -- otherwise a rebuild (e.g. just to also tick "Run
+        Evolution") silently re-checks everything and discards a deliberate
+        selection. Falls back to "all checked" the first time, or when none of
+        the remembered values still apply (e.g. NETWORK TYPE flipped which set
+        of values are layers).
+        """
+        keep: set[str] | None = None
+        if self._visible_layers is not None:
+            intersection = set(result.layer_values) & self._visible_layers
+            if intersection:
+                keep = intersection
+
         self.lst_mln_layers.blockSignals(True)
         self.lst_mln_layers.clear()
         for value in result.layer_values:
             item = QListWidgetItem(value)
             item.setFlags(item.flags() | Qt.ItemFlag.ItemIsUserCheckable)
-            item.setCheckState(Qt.CheckState.Checked)
+            checked = value in keep if keep is not None else True
+            item.setCheckState(
+                Qt.CheckState.Checked if checked else Qt.CheckState.Unchecked
+            )
             self.lst_mln_layers.addItem(item)
         self.lst_mln_layers.blockSignals(False)
+        self._visible_layers = set(self._selected_mln_layers())
 
     def _selected_mln_layers(self) -> list[str]:
         return [
@@ -2402,7 +2426,10 @@ class MainWindow(QMainWindow):
 
         Cheap enough for the GUI thread: the multiplex tables are cached on the
         result, so this only re-filters and redraws -- nothing is recomputed.
+        Also remembers the choice, so the next rebuild can restore it instead
+        of resetting to "all checked" (see ``_populate_mln_layer_list``).
         """
+        self._visible_layers = set(self._selected_mln_layers())
         self._render_mln_view()
 
     def _render_mln_view(self) -> None:
