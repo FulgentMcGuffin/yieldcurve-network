@@ -65,13 +65,17 @@ Point the sidebar at a DuckDB or SQLite file. If the database contains a table c
 |:---:|:---:|
 | ![Edge and Community Evolution](rsrc/images/term_issuer_edges_community.png) | ![NS Residual Metrics](rsrc/images/term_issuer_ns_resids.png) |
 
-| NS Residuals (t)  | NS Residual Std (t)  |
+| NS Resids (t)  | NS Resids Std (t)  |
 |:---:|:---:|
 | ![NS Residuals (t)](rsrc/images/issuer_term_ns_factor.png) | ![NS Residual Std (t)](rsrc/images/issuer_term_ns_factor_std.png) |
 
-| NS Residuals Corr (t)  | NS Residuals Corr trajectory (t)  |
+| NS Resids Corr (t)  | NS Resids Corr trajectory (t)  |
 |:---:|:---:|
-| ![NS Residuals (t)](rsrc/images/issuer_term_ns_resids_corr.png) | ![NS Residual Std (t)](rsrc/images/issuer_term_ns_resids_relationship.png) |
+| ![NS Resids Corr (t)](rsrc/images/issuer_term_ns_resids_corr.png) | ![NS Resids Corr trajectory (t)](rsrc/images/issuer_term_ns_resids_relationship.png) |
+
+| Neural-HJM Resids (t)  | Neural-HJM Resids Corr (t)  |
+|:---:|:---:|
+| ![Neural-HJM Resids (t)](rsrc/images/issuer_term_factor_neural.png) | ![Neural-HJM Resids Corr trajectory (t)](rsrc/images/issuer_term_resids_corr_neural.png) |
 
 ### Test data
 
