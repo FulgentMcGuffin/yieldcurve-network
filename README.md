@@ -33,6 +33,7 @@ If you are looking for a more generic network based exploration of datasets (i.e
    - **Conditional Correlation**: Correlation computed only on high-magnitude move days; captures stress-regime linkage distinct from calm-period correlation.
    - **Mutual Information**: Non-linear, non-monotonic dependence detector; entropy-based measure of shared information.
    - **Chatterjee ξ**: Rank-based test for any dependence; computationally cheap alternative to distance correlation.
+   - **FastDTW distance**: Dynamic Time Warping similarity under a Sakoe-Chiba band constraint (radius configurable in **Edge Settings**), so two series that lead/lag each other by a few observations still register as similar — something no correlation measure here can see, since they all compare same-day values.
    - **Maximal Correlation (ACE)** *(optional, see below)*: Alternating Conditional Expectations, finding nonparametric transformations that maximize correlation.
 4. **Graph Construction and Thresholding**: Prunes weak connections using a user-defined independence threshold to build weighted `NetworkX` graphs, one per layer.
 5. **Multiplex Assembly**: Stacks the per-layer graphs into one graph whose vertices are `(node, layer)` pairs, joining each node to itself across every pair of layers it occurs in.
@@ -287,7 +288,7 @@ Layers may share few nodes, or none — that is a property of the data, not a fa
 | **Community method** | fixed | k-selection strategy per layer (see below) |
 | **Max communities** | 10 | For `fixed`: exact k per layer. For the optimisation methods: upper bound of the search. Also the ceiling on the total distinct communities **MLN: Community** shows after cross-layer alignment — see below. |
 
-Alongside it, the main sidebar carries the **connection measure** (plus measure-specific **Edge Settings**, e.g. the stress-regime quantile for conditional correlation), the **transforms**, the **date range**, and the **independence threshold** (default 0.33 — keep edges where the measure ≥ threshold).
+Alongside it, the main sidebar carries the **connection measure** (plus measure-specific **Edge Settings**, e.g. the stress-regime quantile for conditional correlation or the Sakoe-Chiba band radius for FastDTW), the **transforms**, the **date range**, and the **independence threshold** (default 0.33 — keep edges where the measure ≥ threshold).
 
 ### Community Detection Methods
 
@@ -338,7 +339,7 @@ Colours come from a 10-colour curated palette that matches the notebooks, extend
 
 - Cost is `L × O(n_layer²)` measure evaluations for `L` layers. Layering is usually *cheaper* than one pooled network, since `(Σnᵢ)² > Σnᵢ²`.
 - **Issuer Network by Term** is the cheaper direction on a typical panel: ~10–15 term layers over ~15–40 issuer nodes. **Term Network by Issuer** inverts that — many small layers — and the log warns past 12 layers.
-- Expensive measures (distance correlation, mutual information) multiply across layers. Prefer Spearman, Kendall Tau or Chatterjee ξ while exploring, then re-run with the expensive one.
+- Expensive measures (distance correlation, mutual information, FastDTW) multiply across layers. Prefer Spearman, Kendall Tau or Chatterjee ξ while exploring, then re-run with the expensive one. FastDTW's per-pair cost is `O(n × radius)`, not `O(n²)` like plain DTW, but it is still a pure-Python nested loop rather than a vectorised measure, so it is the slowest of the GUI-selectable options at anything beyond a small radius. Plain (non-windowed) DTW stays API-only for this reason — it has no radius to bound it.
 - **Smoke test first**: run on a truncated date range before committing to full history.
 
 ## NS Residuals
@@ -420,6 +421,12 @@ The three dropdowns stay in lock-step (changing one moves the others), "Neural-H
 * **Shrinkage Correlation (Ledoit-Wolf)**: Denoised correlation via Random Matrix Theory for high-dimensional, short-window settings: [Wikipedia](https://en.wikipedia.org/wiki/Shrinkage_(statistics)).
   - **Reference**: Ledoit, O., & Wolf, M. (2004). *"Honey, I shrunk the sample covariance matrix."* Journal of Portfolio Management, 30(4), 110-119.
 * **Conditional / Exceedance Correlation**: Correlation measured only during stress regimes (extreme moves) versus calm periods; captures tail co-movement and crisis linkage.
+
+### Time-Series Alignment (DTW)
+
+* **Dynamic Time Warping (DTW)**: Distance between two sequences that allows non-linear stretching along the time axis, so a shape match survives a lead/lag that a same-day comparison (correlation) would miss: [Wikipedia](https://en.wikipedia.org/wiki/Dynamic_time_warping).
+  - **Sakoe-Chiba Band**: The windowed alignment constraint used here to bound how far a match can shift, which is what keeps this project's `fastdtw_distance` measure at `O(n × radius)` per pair instead of raw DTW's `O(n²)`: Sakoe, H., & Chiba, S. (1978). *"Dynamic programming algorithm optimization for spoken word recognition."* IEEE Transactions on Acoustics, Speech, and Signal Processing, 26(1), 43-49: [DOI (IEEE)](https://doi.org/10.1109/TASSP.1978.1163055).
+  - **FastDTW**: Origin of the name and the general approximate-DTW-via-windowing approach implemented here: Salvador, S., & Chan, P. (2007). *"FastDTW: Toward accurate dynamic time warping in linear time and space."* Intelligent Data Analysis, 11(5), 561-580: [DOI (IOS Press)](https://doi.org/10.3233/IDA-2007-11508).
 
 ### Community Detection & Clustering
 

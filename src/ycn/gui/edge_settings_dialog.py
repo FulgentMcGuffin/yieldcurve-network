@@ -143,7 +143,9 @@ class EdgeSettingsDialog(QDialog):
         info = QLabel(
             "Configure parameters for connection measures that accept optional settings.\n\n"
             "• Conditional Correlation: Isolates correlation during market stress "
-            "(extreme return days)"
+            "(extreme return days)\n"
+            "• FastDTW: Similarity that tolerates a lead/lag between two series, "
+            "not just same-day co-movement"
         )
         info.setStyleSheet("color: #94a3b8; font-size: 9px;")
         info.setWordWrap(True)
@@ -184,6 +186,7 @@ class EdgeSettingsDialog(QDialog):
         """Reset all settings to defaults."""
         defaults = EdgeSettingsConfig()
         self.spin_conditional_quantile.setValue(defaults.conditional_quantile)
+        self.spin_fastdtw_radius.setValue(defaults.fastdtw_radius)
 
     def get_config(self) -> EdgeSettingsConfig:
         """Return configured EdgeSettingsConfig."""

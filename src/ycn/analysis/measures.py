@@ -614,14 +614,16 @@ MEASURE_SHORT_LABELS: dict[str, str] = {
 # Excluded from available_measures() when that dependency isn't importable.
 _MEASURE_REQUIRES_ACE = {"maximal_correlation"}
 
-# Measures disabled in GUI due to performance (but available via API)
-# DTW is O(n²) per pair; prohibitively slow for large datasets
-# FastDTW is available via API only; for programmatic use where speed/accuracy tradeoff is explicit
-_MEASURE_GUI_DISABLED = {"dtw_distance", "fastdtw_distance"}
+# Raw DTW is O(n^2) per pair with no windowing -- prohibitively slow for
+# anything beyond a toy panel -- so it stays API-only. FastDTW's Sakoe-Chiba
+# band (see fastdtw_distance_matrix, tuned via Edge Settings' "FastDTW
+# Settings" group) brings that down to O(n*radius) per pair, which is why it
+# is GUI-selectable while plain DTW is not.
+_MEASURE_GUI_DISABLED = {"dtw_distance"}
 
 
 def available_measures() -> list[tuple[str, str]]:
-    """Measures selectable in the GUI: excludes ACE if ace_cream isn't usable, DTW (performance)."""
+    """Measures selectable in the GUI: excludes ACE if ace_cream isn't usable, raw DTW (performance)."""
     return [
         (key, MEASURE_LABELS.get(key, key))
         for key in MEASURES
