@@ -387,6 +387,7 @@ The three dropdowns stay in lock-step (changing one moves the others), "Neural-H
 * **NetworkX**: Network analysis and graph structures: [Official Site](https://networkx.org/) | [GitHub](https://github.com/networkx/networkx).
 * **Polars**: High-performance, multi-threaded dataframe execution engine: [Documentation](https://docs.pola.rs/) | [GitHub](https://github.com/pola-rs/polars).
 * **plotnine**: Grammar-of-graphics plotting used by the notebooks (`ggplot`-style layered charts): [Documentation](https://plotnine.org/) | [GitHub](https://github.com/has2k1/plotnine).
+* **PyTorch**: Tensor/autograd library the experimental Neural HJM residual model trains on (optional `neural` extra): [Documentation](https://pytorch.org/docs/) | [GitHub](https://github.com/pytorch/pytorch).
 * **DuckDB**: In-process analytical database used as the primary backend: [Documentation](https://duckdb.org/docs/) | [GitHub](https://github.com/duckdb/duckdb).
 * **Plotly**: Interactive, browser-rendered 3D graphing used for the multiplex view: [Documentation](https://plotly.com/python/) | [GitHub](https://github.com/plotly/plotly.py).
 * **MultiLayerNetViz**: 3D multiplex visualization this project's MLN view is derived from: [GitHub Repository](https://github.com/FulgentMcGuffin/MultiLayerNetViz).
@@ -398,6 +399,9 @@ The three dropdowns stay in lock-step (changing one moves the others), "Neural-H
 * **Nelson-Siegel Model**: Parsimonious level/slope/curvature parameterisation of the yield curve, used by this project's synthetic data generator: [Wikipedia](https://en.wikipedia.org/wiki/Fixed-income_attribution#Modeling_the_yield_curve).
   - **Foundational Paper**: Nelson, C. R., & Siegel, A. F. (1987). *"Parsimonious Modeling of Yield Curves."* The Journal of Business, 60(4), 473-489: [DOI (JSTOR)](https://www.jstor.org/stable/2352957).
   - **Dynamic Extension**: Diebold, F. X., & Li, C. (2006). *"Forecasting the term structure of government bond yields."* Journal of Econometrics, 130(2), 337-364: [DOI (Elsevier)](https://doi.org/10.1016/j.jeconom.2005.03.005).
+* **Arbitrage-Free Nelson-Siegel (AFNS)**: Adds the no-arbitrage yield-adjustment term this project's `afns`/`dtafns` residual models are built from: Christensen, J. H. E., Diebold, F. X., & Rudebusch, G. D. (2011). *"The affine arbitrage-free class of Nelson-Siegel term structure models."* Journal of Econometrics, 164(1), 4-20: [DOI (Elsevier)](https://doi.org/10.1016/j.jeconom.2011.02.011) | [PDF](https://www.sas.upenn.edu/~fdiebold/papers/paper78/cdr.pdf).
+* **Heath-Jarrow-Morton (HJM) Framework**: Models the full forward-rate curve's no-arbitrage drift directly, the constraint the experimental **Neural HJM** residual model is named for: [Wikipedia](https://en.wikipedia.org/wiki/Heath%E2%80%93Jarrow%E2%80%93Morton_framework).
+  - **Neural HJM (experimental, this project's `neural_hjm` model)**: Gao, X., & Hyndman, C. (2025). *"Arbitrage-Free Bond and Yield Curve Forecasting with Neural Filters under HJM Constraints."* arXiv preprint: [arXiv:2511.17892](https://arxiv.org/abs/2511.17892). The paper publishes neither code nor hyperparameters, so `ycn` implements a documented, partial subset — see `analysis/af_neural.py` and `analysis/af_references.py` for exactly what is and is not reproduced, and `ycs_neural_hjm.ipynb` for a worked comparison against the other curve models.
 
 ### Statistical Relationships & Correlation
 
