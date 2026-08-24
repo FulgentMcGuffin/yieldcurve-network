@@ -150,7 +150,12 @@ Curve panels are ragged: an issuer may not quote the short end, may have dropped
 
 Note that filling a row necessarily re-checks cells you had removed column-by-column (and vice versa) — the header counts are there to make that immediately visible.
 
-Only checked cells reach the network. The selection persists between openings, but is **discarded whenever the table, date column, date range or Optional Filter changes** — the selection is a set of labels, not row identities, so it stops being meaningful once the underlying data moves. The process log says when this happens.
+Only checked cells reach the network. The selection is a set of `(term, issuer)` **labels**, so it survives a date-range or Optional Filter change: a picked cell that has no data under the new filters simply contributes nothing (never an error), and a cell that becomes newly available renders as an unchecked, pickable box rather than being silently included. It is **discarded only when the table or date column changes** — those redefine what a "term" or "issuer" label even means, unlike a date range or `WHERE` clause, which just change who currently has data. The process log (and the status bar) say when that happens.
+
+| User Filter | 
+|:---:|
+| ![User Filter](rsrc/images/node_selection.png) |
+
 
 
 ## Execution Model
@@ -381,6 +386,7 @@ The three dropdowns stay in lock-step (changing one moves the others), "Neural-H
 * **graspologic (Python 3.13 Compatible Fork)**: Graph statistical algorithms optimized for modern Python and dependency stacks: [GitHub Repository](https://github.com/FulgentMcGuffin/graspologic).
 * **NetworkX**: Network analysis and graph structures: [Official Site](https://networkx.org/) | [GitHub](https://github.com/networkx/networkx).
 * **Polars**: High-performance, multi-threaded dataframe execution engine: [Documentation](https://docs.pola.rs/) | [GitHub](https://github.com/pola-rs/polars).
+* **plotnine**: Grammar-of-graphics plotting used by the notebooks (`ggplot`-style layered charts): [Documentation](https://plotnine.org/) | [GitHub](https://github.com/has2k1/plotnine).
 * **DuckDB**: In-process analytical database used as the primary backend: [Documentation](https://duckdb.org/docs/) | [GitHub](https://github.com/duckdb/duckdb).
 * **Plotly**: Interactive, browser-rendered 3D graphing used for the multiplex view: [Documentation](https://plotly.com/python/) | [GitHub](https://github.com/plotly/plotly.py).
 * **MultiLayerNetViz**: 3D multiplex visualization this project's MLN view is derived from: [GitHub Repository](https://github.com/FulgentMcGuffin/MultiLayerNetViz).

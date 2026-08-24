@@ -1103,21 +1103,52 @@ class MainWindow(QMainWindow):
         self.btn_cancel.setEnabled(busy)
 
     # ------------------------------------------------------------ user filter
-    def _mask_context_key(self) -> tuple:
-        """Identity of the data the cell mask was picked against.
+    # Field names for _mask_context_key(), in the same order -- used only to
+    # turn a mismatch into a readable diff (see _describe_mask_key_mismatch).
+    _MASK_KEY_FIELDS = ("db_path", "table", "date_column")
 
-        A mask is a set of ``(term, issuer)`` labels, so it only stays
-        meaningful while the underlying panel and pre-filters do. Changing any
-        of these invalidates it rather than silently cutting the new data with
-        stale labels.
+    def _mask_context_key(self) -> tuple:
+        """Identity of the *label space* the cell mask's (term, issuer) pairs
+        were picked from.
+
+        Deliberately narrow: only the database, table and date column decide
+        what a "term" or "issuer" label even means, so only those invalidate
+        the mask. The date range and the Optional Filter's WHERE clause change
+        which labels currently have data, not what the labels mean -- so
+        instead of resetting the whole mask, ``filter_by_cell_mask`` is a
+        best-effort intersection: a picked pair that lost its data simply
+        contributes nothing (never an error), and the User Filter dialog shows
+        any newly-available pair as an unchecked, pickable cell rather than
+        silently including it. Resetting on every date-range tweak used to
+        make a picked selection feel like it "randomly" reverted to
+        everything whenever the range moved even slightly.
         """
         return (
             str(self._db_path),
             self.cmb_table.currentText(),
             self.cmb_date.currentText(),
-            self._where_clause(),
-            self.date_start.date().toPython(),
-            self.date_end.date().toPython(),
+        )
+
+    def _describe_mask_key_mismatch(self, old: tuple | None, new: tuple) -> str:
+        """Which field(s) changed between two mask-context keys, for the log.
+
+        The plain "settings changed" message doesn't say *what* changed, which
+        has made a handful of unexplained resets hard to pin down. This turns
+        a mismatch into something a bug report can actually be diagnosed from.
+        """
+        if old is None:
+            return "no cells were picked against a stored context yet"
+        if len(old) != len(self._MASK_KEY_FIELDS):
+            return f"old={old!r} new={new!r}"
+        diffs = [
+            f"{name} {o!r} -> {n!r}"
+            for name, o, n in zip(self._MASK_KEY_FIELDS, old, new)
+            if o != n
+        ]
+        return (
+            "; ".join(diffs)
+            if diffs
+            else "(keys compare unequal but no field differs?!)"
         )
 
     def _reset_cell_mask(self) -> None:
@@ -1591,13 +1622,27 @@ class MainWindow(QMainWindow):
         kind = self._network_kind()
         mask = None
         if with_mask and self._cell_mask is not None:
-            if self._mask_context_key() == self._cell_mask_key:
+            current_key = self._mask_context_key()
+            if current_key == self._cell_mask_key:
                 mask = sorted(self._cell_mask)
             else:
-                self._append_log(
-                    "User Filter cleared: the table, date range or Optional "
-                    "Filter changed since the cells were picked."
+                # Only reaches here if the database, table or date column
+                # changed without going through _on_table_changed /
+                # _on_date_column_changed (which already reset the mask
+                # themselves) -- e.g. a session load. Date range and the
+                # Optional Filter deliberately do NOT land here any more; see
+                # _mask_context_key. Easy to miss as just another log line
+                # once a run is under way, so it also goes on the status
+                # label, and the diff says exactly what changed.
+                message = (
+                    "User Filter cleared: the table or date column changed "
+                    "since the cells were picked."
                 )
+                diff = self._describe_mask_key_mismatch(
+                    self._cell_mask_key, current_key
+                )
+                self._append_log(f"WARNING: {message} ({diff})")
+                self.lbl_status.setText(message)
                 self._reset_cell_mask()
 
         return PipelineConfig(
