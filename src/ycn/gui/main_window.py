@@ -89,6 +89,7 @@ from ycn.analysis.yield_curve import (
 )
 from ycn.gui.evolution_settings_dialog import EvolutionSettingsDialog
 from ycn.gui.data_table_dialog import DataTableDialog, eye_icon
+from ycn.gui.factor_trajectory_tab import FactorTrajectoryTab
 from ycn.gui.mln_bridge import (
     MLNBridge,
     MLNWebPage,
@@ -189,7 +190,10 @@ class MainWindow(QMainWindow):
         self._mln_worker: MLNWorker | None = None
         self._mln_result: MLNResult | None = None
         self._mln_temp_html: Path | None = None
-        self._mln_temp_dir: Path | None = None
+        # Shared by every embedded Plotly view (the MLN scene and both factor
+        # trajectories): one directory, one 4MB plotly.min.js sidecar, one
+        # cleanup in closeEvent.
+        self._plotly_temp_dir: Path | None = None
         # Workers detached by Cancel Render, kept alive until their thread
         # actually exits. Dropping the last Python reference to a still-running
         # QThread/worker lets Qt delete the C++ object underneath it and crash.
@@ -565,6 +569,19 @@ class MainWindow(QMainWindow):
         self.evo_factor_std_layout, factor_std_page = self._figure_page()
         self.tabs_evo_resids.addTab(factor_page, "Factor")
         self.tabs_evo_resids.addTab(factor_std_page, "Factor Std")
+
+        # The same numbers as the two static sub-tabs, but plotted as one path
+        # through level x slope x curvature space instead of three series
+        # against time -- the joint position is what carries the curve shape.
+        # Interactive (Plotly in a web view), like the MLN tab.
+        self.tab_factor_t = FactorTrajectoryTab(
+            self._plotly_asset_dir, std=False, on_message=self._on_js_message
+        )
+        self.tab_factor_std_t = FactorTrajectoryTab(
+            self._plotly_asset_dir, std=True, on_message=self._on_js_message
+        )
+        self.tabs_evo_resids.addTab(self.tab_factor_t, "Factor (t)")
+        self.tabs_evo_resids.addTab(self.tab_factor_std_t, "Factor Std (t)")
         self.tabs_evo_resids.currentChanged.connect(self._update_view_data_button)
         self.tabs.addTab(
             self._wrap_with_source_picker(self.tabs_evo_resids), "Evo: Resids"
@@ -720,6 +737,10 @@ class MainWindow(QMainWindow):
         self._show_figure(self.evo_factor_layout, result.factor_fig)
         self._show_figure(self.evo_factor_std_layout, result.factor_std_fig)
         self._show_figure(self.evo_cov_layout, result.stress_fig)
+        # The two 3D sub-tabs read the same frames as the static ones, so the
+        # picker moves all four together.
+        self.tab_factor_t.set_result(result.factors, result.regimes)
+        self.tab_factor_std_t.set_result(result.factors, result.regimes)
         self.tab_cov_t.set_result(result.stress)
         self._update_view_data_button()
 
@@ -2079,6 +2100,8 @@ class MainWindow(QMainWindow):
             self.evo_cov_layout,
         ):
             self._evolution_placeholder(layout, text)
+        self.tab_factor_t.set_placeholder(text)
+        self.tab_factor_std_t.set_placeholder(text)
         self.tab_cov_t.set_placeholder(text)
         self._evolution_result = None
         self._neural_evolution_result = None
@@ -2515,20 +2538,25 @@ class MainWindow(QMainWindow):
         except Exception as exc:  # noqa: BLE001
             self._append_log(f"MLN view render error: {exc}")
 
-    def _mln_asset_dir(self) -> Path:
-        """Temp dir holding the MLN page and its one-time plotly.min.js sidecar."""
-        if self._mln_temp_dir is None:
-            self._mln_temp_dir = Path(tempfile.mkdtemp(prefix="ycn_mln_"))
-        js_path = self._mln_temp_dir / "plotly.min.js"
+    def _plotly_asset_dir(self) -> Path:
+        """Temp dir holding every Plotly page and their one plotly.min.js sidecar.
+
+        Shared with the two factor-trajectory tabs (they take this method as a
+        callable), so the 4MB sidecar is written once per session rather than
+        once per view.
+        """
+        if self._plotly_temp_dir is None:
+            self._plotly_temp_dir = Path(tempfile.mkdtemp(prefix="ycn_plotly_"))
+        js_path = self._plotly_temp_dir / "plotly.min.js"
         if not js_path.exists():
             from plotly.offline import get_plotlyjs
 
             js_path.write_text(get_plotlyjs(), encoding="utf-8")
-        return self._mln_temp_dir
+        return self._plotly_temp_dir
 
     def _write_mln_html(self, html: str) -> None:
         """Write the MLN page next to its JS sidecar and load it."""
-        directory = self._mln_asset_dir()
+        directory = self._plotly_asset_dir()
         handle = tempfile.NamedTemporaryFile(
             prefix="view_", suffix=".html", dir=str(directory), delete=False
         )
@@ -2568,10 +2596,10 @@ class MainWindow(QMainWindow):
             if thread is not None and thread.isRunning():
                 thread.quit()
                 thread.wait(2000)
-        if self._mln_temp_dir and self._mln_temp_dir.exists():
+        if self._plotly_temp_dir and self._plotly_temp_dir.exists():
             import shutil
 
-            shutil.rmtree(self._mln_temp_dir, ignore_errors=True)
+            shutil.rmtree(self._plotly_temp_dir, ignore_errors=True)
         try:
             self._data_cache.frame_cache.cache_container.close()
         except Exception:  # noqa: BLE001

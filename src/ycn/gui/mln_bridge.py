@@ -54,21 +54,26 @@ class MLNBridge(QObject):
 
 
 class MLNWebPage(QWebEnginePage):
-    """The MLN view's page, with JS console output routed into the app.
+    """An embedded Plotly page with JS console output routed into the app.
 
     Qt's default page prints every JS console message to stderr as ``js: ...``,
     where a real error is indistinguishable from a performance hint and neither
     is visible to someone running the GUI from a shortcut. Messages go to the
     process log instead, minus the muted hints.
+
+    Shared by every Plotly view in the app, so ``label`` names which one a
+    message came from -- "MLN view" and "Factor (t)" land in the same log.
     """
 
     def __init__(
         self,
         parent: QObject | None = None,
         on_message: Callable[[str], None] | None = None,
+        label: str = "MLN view",
     ) -> None:
         super().__init__(parent)
         self._on_message = on_message
+        self._label = label
 
     def javaScriptConsoleMessage(  # noqa: N802 -- Qt override
         self,
@@ -82,7 +87,7 @@ class MLNWebPage(QWebEnginePage):
         if self._on_message is None:
             return
         name = getattr(level, "name", str(level)).replace("MessageLevel", "").lower()
-        self._on_message(f"MLN view [{name}]: {message}")
+        self._on_message(f"{self._label} [{name}]: {message}")
 
 
 # Plotly's bundled bundle reads pixels back from 2D canvases repeatedly (text

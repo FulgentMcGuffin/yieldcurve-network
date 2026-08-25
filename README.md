@@ -41,7 +41,7 @@ If you are looking for a more generic network based exploration of datasets (i.e
 7. **Multi-Layer Metrics and Community Detection**: Per-layer intra/inter edge composition, a node × layer centrality heatmap, and per-layer community detection (ASE + KMeans) with Jaccard alignment so a community ID means the same group of nodes in every layer.
 8. **Interactive 3D Multiplex Visualization**: A rotatable Plotly stack, one plane per layer, with layer toggling and click-through to a node table.
 9. **Nelson-Siegel Residual Networks**: Strips the fitted curve from each issuer and networks the idiosyncratic remainder — one network per component network — charted with user-selectable y / shape / fill / size aesthetics.
-10. **Temporal Evolution**: Rebuilds the multiplex in every rolling window and tracks its edge composition, the community count chosen by each of five k-selection methods, Nelson-Siegel factor trajectories with regime classification, and correlation-stress indicators.
+10. **Temporal Evolution**: Rebuilds the multiplex in every rolling window and tracks its edge composition, the community count chosen by each of five k-selection methods, Nelson-Siegel factor trajectories with regime classification, and correlation-stress indicators. Factor trajectories are charted both as series against time and as an interactive 3D path through level × slope × curvature space with a date scrubber.
 
 ## Quickstart
 
@@ -77,6 +77,11 @@ Point the sidebar at a DuckDB or SQLite file. If the database contains a table c
 | Neural-HJM Resids (t)  | Neural-HJM Resids Corr (t)  |
 |:---:|:---:|
 | ![Neural-HJM Resids (t)](rsrc/images/issuer_term_factor_neural.png) | ![Neural-HJM Resids Corr trajectory (t)](rsrc/images/issuer_term_resids_corr_neural.png) |
+
+| NS Resids 3D (t)  | NS Resids Std 3D (t)  |
+|:---:|:---:|
+| ![NS Residuals 3D (t)](rsrc/images/issuer_term_ns_factor_trajectory.png) | ![NS Residual Std 3D (t)](rsrc/images/issuer_term_ns_factor_std_trajectory.png) |
+
 
 ### Test data
 
@@ -217,7 +222,7 @@ Starts once the NS pass reports back, and only when **Run Evolution** is ticked.
 | Computation | Feeds |
 |---|---|
 | Rebuild the whole multiplex in every rolling window; track edge composition and the *k* chosen by each of the five methods | **Evo: Links** |
-| Nelson-Siegel factors of the market-average curve + Gaussian-mixture regimes | **Evo: Resids** (*Factor* / *Factor Std*), NS side |
+| Nelson-Siegel factors of the market-average curve + Gaussian-mixture regimes | **Evo: Resids** (*Factor* / *Factor Std* / *Factor (t)* / *Factor Std (t)*), NS side |
 | Rolling stability of the residual correlation structure → stress indicators | **Evo: Cov**, **Evo: Cov(t)**, NS side |
 
 Note that this stage builds **its own** NS residual cube for the stress computation rather than reusing stage 2's. The two are computed twice; sharing them is an obvious future saving.
@@ -364,7 +369,7 @@ This is [stage 2](#2-ns-residuals-thread): a single snapshot over the configured
 [Stage 3](#3-evolution-thread). Tick **Run Evolution** to rebuild the whole multiplex inside every rolling window and track how it changes. Four tabs:
 
 - **Evo: Links** — intra/inter edge counts and composition over time, and the community count *k* that each of the five k-selection methods picks per window. Because each window's *k* depends only on that window, there is no lookahead.
-- **Evo: Resids** — *Factor* and *Factor Std* sub-tabs: level, slope and curvature of the market-average curve and their within-window volatility, shaded by a Gaussian-mixture regime label.
+- **Evo: Resids** — four sub-tabs over the same factor frame. *Factor* and *Factor Std* chart level, slope and curvature of the market-average curve and their within-window volatility as three series against time, shaded by a Gaussian-mixture regime label. *Factor (t)* and *Factor Std (t)* plot the **same numbers as one path through level × slope × curvature space** — see [3D factor trajectories](#3d-factor-trajectories-factor-t--factor-std-t).
 - **Evo: Cov** — the four correlation-stress indicators, one per quadrant: average |correlation|, its variance, the count of strongly correlated pairs, and a 0–100 stress indicator.
 - **Evo: Cov(t)** — a dotted time trajectory through any two of those four series. Stressed windows (indicator > 50) are ringed and the endpoints are labelled. Selection is **bidirectional**: drag the date slider to walk a cursor along the path, or click a point on the chart to jump the slider to that date. The two axes can never carry the same series: picking the one already on the other axis swaps them.
 
@@ -378,7 +383,23 @@ This is much slower than a single multiplex — it is `n_windows` multiplex buil
 
 When [stage 4](#4-neural-hjm-evolution-thread) has also run (**Run Evolution** *and* **Run Neural-HJM** both ticked), **Evo: Resids**, **Evo: Cov** and **Evo: Cov(t)** each gain a **Show** dropdown: **NS Resids** / **Neural-HJM resids**. It selects which model's factor trajectory and stress indicators those three tabs display — the multiplex structure in **Evo: Links** is unaffected, since edge composition and community count depend only on the connection measure, not on which curve model produced the residuals.
 
-The three dropdowns stay in lock-step (changing one moves the others), "Neural-HJM resids" is disabled until that stage actually finishes, and the **eye button** always exports whichever dataset is currently shown.
+The three dropdowns stay in lock-step (changing one moves the others), "Neural-HJM resids" is disabled until that stage actually finishes, and the **eye button** always exports whichever dataset is currently shown. Inside **Evo: Resids**, all four sub-tabs — including the two 3D trajectories below — follow that one dropdown.
+
+### 3D factor trajectories: *Factor (t)* / *Factor Std (t)*
+
+Level, slope and curvature are not independent readings; a bull steepener and a bear steepener are *different points in factor space*, not different slope numbers. Charting the three as separate series against time (the *Factor* / *Factor Std* sub-tabs) shows what each one did, but not where the curve is or which way it is moving. These two sub-tabs plot the identical frame as **one path through level × slope × curvature space**, walked in window order, so joint motion — a rotation, a regime loop, a reversal that never shows as a turning point in any single series — is directly visible.
+
+They are **interactive**, built the same way the [MLN tab](#mln--interactive-3d-multiplex) is (a Plotly scene in an embedded web view, same dark canvas and camera idiom):
+
+- **Rotate, pan and zoom** the factor cube directly; **hover** any window for its date, its three factor values and its regime label.
+- The path is coloured by a **single-hue sequential ramp** running dark (earliest window) to light (latest), so direction of travel reads off the colour alone — and still does in greyscale or under colour-vision deficiency, since lightness increases monotonically. The colour bar is the scale legend.
+- Only the **endpoints are labelled**; the axis, the hover and the scrubber carry the rest.
+- A **date slider** walks an amber highlight marker along the path. Selection is **bidirectional**, as on *Evo: Cov(t)*: drag the slider, or click a point to jump the slider to it. Scrubbing moves that one marker via `Plotly.restyle` rather than redrawing the scene, so **your camera angle survives the scrub** — a rebuild per tick would reset the rotation on every step and make the control useless.
+- *Factor (t)* plots the window means; *Factor Std (t)* plots the within-window volatilities, on the same axes.
+
+These are *not* a Dash server — there is no extra process and no port. Like the MLN tab, each is a Plotly figure written to a temp HTML file and loaded into an embedded web view. All three interactive views share **one** temp directory and **one** `plotly.min.js` sidecar for the session, so each page is around 30 KB rather than carrying a 4 MB copy of Plotly, and the whole directory is removed when the window closes.
+
+A [reloaded session](#saving-and-reloading-an-analysis) repopulates these two tabs like any other: the stored frame *is* the trajectory, so the scene and its scrubber come back without recomputing, and nothing about the 3D view is pickled into the archive.
 
 ## References
 
