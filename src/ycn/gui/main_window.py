@@ -15,7 +15,7 @@ from datetime import date
 from pathlib import Path
 
 from PySide6.QtCore import QDate, QSize, QThread, QUrl, Qt
-from PySide6.QtGui import QColor, QKeySequence, QPalette, QShortcut, QTextCursor
+from PySide6.QtGui import QColor, QIcon, QKeySequence, QPalette, QPixmap, QShortcut, QTextCursor
 from PySide6.QtWebEngineWidgets import QWebEngineView
 from PySide6.QtWebChannel import QWebChannel
 from PySide6.QtWidgets import (
@@ -91,6 +91,7 @@ from ycn.analysis.yield_curve import (
     load_long_panel,
 )
 from ycn.gui.evolution_settings_dialog import EvolutionSettingsDialog
+from ycn.gui.gui_settings_dialog import GuiSettingsDialog, THEMES
 from ycn.gui.data_table_dialog import DataTableDialog, eye_icon
 from ycn.gui.degree_threshold_slider import build_threshold_slider
 from ycn.gui.factor_trajectory_tab import FactorTrajectoryTab
@@ -164,6 +165,7 @@ class MainWindow(QMainWindow):
     def __init__(self) -> None:
         super().__init__()
         self.setWindowTitle("YieldCurve-Network")
+        self.setWindowIcon(self._create_network_icon())
         self.resize(1440, 990)
         self.setStyleSheet(APP_STYLE)
 
@@ -195,6 +197,8 @@ class MainWindow(QMainWindow):
         self._edge_settings = EdgeSettingsConfig()
 
         self._mln_config = MLNConfig(layer_column="")
+        # GUI theme name; defaults to "Sky Blue" (the original theme)
+        self._current_theme = "Sky Blue"
         self._mln_worker_thread: QThread | None = None
         self._mln_worker: MLNWorker | None = None
         self._mln_result: MLNResult | None = None
@@ -268,6 +272,56 @@ class MainWindow(QMainWindow):
                 "Install a Fortran compiler (gfortran) and run "
                 "`uv sync --extra ace` to enable it."
             )
+
+    @staticmethod
+    def _create_network_icon() -> QIcon:
+        """Create a network-themed icon for the application."""
+        # Create a 64x64 pixmap with network graph visualization
+        pixmap = QPixmap(64, 64)
+        pixmap.fill(QColor(0, 0, 0, 0))  # Transparent
+
+        from PySide6.QtGui import QPainter, QPen
+        painter = QPainter(pixmap)
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing)
+
+        # Draw network nodes (circles)
+        node_color = QColor(0, 212, 255)  # Cyan accent
+        node_radius = 5
+
+        # Define node positions in a circular pattern
+        nodes = [
+            (32, 16),   # Top
+            (48, 24),   # Top-right
+            (52, 40),   # Right
+            (48, 56),   # Bottom-right
+            (32, 48),   # Bottom
+            (16, 56),   # Bottom-left
+            (12, 40),   # Left
+            (16, 24),   # Top-left
+            (32, 32),   # Center
+        ]
+
+        # Draw edges (lines between nodes)
+        edge_color = QColor(100, 150, 200)
+        pen = QPen(edge_color, 1)
+        painter.setPen(pen)
+
+        # Connect center to all outer nodes
+        center = nodes[-1]
+        for node in nodes[:-1]:
+            painter.drawLine(center[0], center[1], node[0], node[1])
+
+        # Connect adjacent outer nodes
+        for i in range(len(nodes) - 1):
+            painter.drawLine(nodes[i][0], nodes[i][1], nodes[(i + 1) % 8][0], nodes[(i + 1) % 8][1])
+
+        # Draw nodes (circles)
+        painter.setBrush(node_color)
+        for node in nodes:
+            painter.drawEllipse(node[0] - node_radius, node[1] - node_radius, node_radius * 2, node_radius * 2)
+
+        painter.end()
+        return QIcon(pixmap)
 
     # ------------------------------------------------------------------ UI
     def _build_sidebar(self) -> QWidget:
@@ -456,22 +510,6 @@ class MainWindow(QMainWindow):
             "Configure network evolution analysis parameters"
         )
         evolution_body.addWidget(self.btn_evolution_settings)
-
-        self.chk_neural_hjm = QCheckBox("Run Neural-HJM")
-        self.chk_neural_hjm.setToolTip(
-            "Also fit the experimental Neural HJM model (needs the 'neural' "
-            "extra) and compute its factor/stress evolution alongside the "
-            "Nelson-Siegel one. Only runs when 'Run Evolution' is also "
-            "ticked; adds a fourth, sequential analysis stage -- this is the "
-            "slowest of them, since it trains one small neural net per issuer."
-        )
-        evolution_body.addWidget(self.chk_neural_hjm)
-        if not NEURAL_AVAILABLE:
-            self.chk_neural_hjm.setEnabled(False)
-            self.chk_neural_hjm.setToolTip(
-                "Needs the optional 'neural' extra (uv sync --extra neural): "
-                f"{NEURAL_IMPORT_ERROR}"
-            )
         self.chk_evolution.toggled.connect(self._on_evolution_checkbox_toggled)
 
         form.addSpacing(8)
@@ -524,6 +562,12 @@ class MainWindow(QMainWindow):
         self.lbl_session.setWordWrap(True)
         form.addWidget(self.lbl_session)
 
+        self.btn_gui_settings = QPushButton("⚙ GUI Settings")
+        self.btn_gui_settings.setObjectName("SecondaryButton")
+        self.btn_gui_settings.setToolTip("Configure GUI appearance and themes")
+        self.btn_gui_settings.clicked.connect(self._show_gui_settings)
+        form.addWidget(self.btn_gui_settings)
+
         QShortcut(QKeySequence.StandardKey.Save, self, self._save_session)
         QShortcut(QKeySequence.StandardKey.Open, self, self._load_session)
 
@@ -540,6 +584,8 @@ class MainWindow(QMainWindow):
         self.tabs = QTabWidget()
         self.tabs.setObjectName("ResultTabs")
         self.tabs.setMinimumHeight(300)
+        self.tabs.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding)
+        self.tabs.tabBar().setMinimumHeight(32)
 
         self.tabs.addTab(self._build_mln_page(), "MLN")
 
@@ -1180,9 +1226,6 @@ class MainWindow(QMainWindow):
         # Evolution settings stay configurable ahead of the feature landing.
         self.btn_evolution_settings.setEnabled(enabled)
         self.chk_evolution.setEnabled(enabled)
-        self.chk_neural_hjm.setEnabled(
-            enabled and self.chk_evolution.isChecked() and NEURAL_AVAILABLE
-        )
         self.txt_filter_where.setEnabled(enabled and self.chk_filter_where.isChecked())
         if enabled and (
             self._db_path is None or self._panel is None or not self._panel.is_usable
@@ -1356,6 +1399,8 @@ class MainWindow(QMainWindow):
             initial_config=self._evolution_config,
             independent_threshold=float(self.spin_threshold.value()),
             evolution_enabled=self.chk_evolution.isChecked(),
+            neural_available=NEURAL_AVAILABLE,
+            neural_import_error=NEURAL_IMPORT_ERROR,
         )
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self._evolution_config = dialog.get_config()
@@ -1365,17 +1410,15 @@ class MainWindow(QMainWindow):
                 f"expanding={self._evolution_config.expanding}, "
                 f"edge threshold={self._evolution_config.independent_threshold:.2f}, "
                 f"centrality={self._evolution_config.centrality}, "
-                f"run_centrality={self._evolution_config.run_centrality}"
+                f"run_centrality={self._evolution_config.run_centrality}, "
+                f"run_neural_hjm={self._evolution_config.run_neural_hjm}"
             )
 
     def _on_evolution_checkbox_toggled(self, checked: bool) -> None:
-        """ "Run Neural-HJM" only makes sense once "Run Evolution" is ticked."""
-        self.chk_neural_hjm.setEnabled(
-            checked and NEURAL_AVAILABLE and self.chk_evolution.isEnabled()
-        )
+        """Clear evolution-dependent settings when "Run Evolution" is unchecked."""
         if not checked:
-            self.chk_neural_hjm.setChecked(False)
             self._evolution_config.run_centrality = False
+            self._evolution_config.run_neural_hjm = False
 
     def _show_edge_settings(self) -> None:
         from ycn.gui.edge_settings_dialog import EdgeSettingsDialog
@@ -1384,6 +1427,72 @@ class MainWindow(QMainWindow):
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self._edge_settings = dialog.get_config()
             self._append_log(f"Edge settings: {self._edge_settings.to_dict()}")
+
+    def _show_gui_settings(self) -> None:
+        """Show GUI settings dialog and apply selected theme."""
+        dialog = GuiSettingsDialog(self, initial_theme=self._current_theme)
+        if dialog.exec() == QDialog.DialogCode.Accepted:
+            new_theme = dialog.get_theme_name()
+            if new_theme != self._current_theme:
+                self._current_theme = new_theme
+                self._apply_theme(new_theme)
+                self._append_log(f"Applied theme: {new_theme}")
+
+    def _apply_theme(self, theme_name: str) -> None:
+        """Apply a named theme to the entire application."""
+        theme = GuiSettingsDialog.get_theme(theme_name)
+        if theme is None:
+            return
+        # Update global stylesheet with theme colors
+        theme_css = self._generate_theme_css(theme)
+        self.setStyleSheet(theme_css)
+
+    @staticmethod
+    def _generate_theme_css(theme) -> str:
+        """Generate CSS stylesheet from theme definition."""
+        # Base style from APP_STYLE with theme color overrides
+        base_css = """
+        QWidget { color: #ffffff; }
+        QMainWindow, QDialog, QFrame { background-color: %(bg_primary)s; }
+        QLabel { color: %(text_primary)s; }
+        QPushButton, QToolButton { background-color: %(accent)s; color: #ffffff;
+                                    border: 1px solid %(border)s; border-radius: 4px;
+                                    padding: 6px 12px; }
+        QPushButton:pressed { background-color: %(input_bg)s; }
+        QPushButton:hover { background-color: %(accent)s; opacity: 0.8; }
+        QPushButton:disabled { background-color: %(input_bg)s; color: %(text_secondary)s; }
+        QCheckBox { color: %(text_primary)s; }
+        QComboBox { background-color: %(input_bg)s; color: %(text_primary)s;
+                   border: 1px solid %(border)s; border-radius: 3px; }
+        QSpinBox, QDoubleSpinBox { background-color: %(input_bg)s; color: %(text_primary)s;
+                                   border: 1px solid %(border)s; border-radius: 3px; }
+        QLineEdit, QPlainTextEdit { background-color: %(input_bg)s; color: %(text_primary)s;
+                                   border: 1px solid %(border)s; border-radius: 3px; }
+        QTabWidget::pane { border: 1px solid %(border)s; }
+        QTabBar::tab { background-color: %(bg_sidebar)s; color: %(text_primary)s;
+                       padding: 6px 16px; border: 1px solid %(border)s; }
+        QTabBar::tab:selected { background-color: %(accent)s; color: #ffffff; }
+        QTableWidget { background-color: %(input_bg)s; color: %(text_primary)s;
+                      gridline-color: %(border)s; }
+        QTableWidget::item { padding: 4px; }
+        QHeaderView::section { background-color: %(bg_sidebar)s; color: %(text_primary)s;
+                              padding: 4px; border: 1px solid %(border)s; }
+        QScrollBar:vertical { background-color: %(bg_sidebar)s; width: 12px; }
+        QScrollBar::handle:vertical { background-color: %(accent)s; border-radius: 6px; }
+        #StatusLabel { color: %(text_secondary)s; }
+        #SidebarFrame { background-color: %(bg_sidebar)s; }
+        #SecondaryButton { background-color: %(accent)s; color: #ffffff; }
+        #SecondaryButton:hover { background-color: %(border)s; }
+        """
+        return base_css % {
+            "bg_primary": theme.bg_primary,
+            "bg_sidebar": theme.bg_sidebar,
+            "text_primary": theme.text_primary,
+            "text_secondary": theme.text_secondary,
+            "accent": theme.accent,
+            "border": theme.border,
+            "input_bg": theme.input_bg,
+        }
 
     # -------------------------------------------------------------------- run
     def _selected_transforms(self) -> list[str]:
@@ -1430,7 +1539,7 @@ class MainWindow(QMainWindow):
             },
             "evolution": {
                 "enabled": self.chk_evolution.isChecked(),
-                "run_neural_hjm": self.chk_neural_hjm.isChecked(),
+                "run_neural_hjm": self._evolution_config.run_neural_hjm,
                 "window_size": self._evolution_config.window_size,
                 "step": self._evolution_config.step,
                 "expanding": self._evolution_config.expanding,
@@ -1570,15 +1679,11 @@ class MainWindow(QMainWindow):
                         settings.get("independent_threshold", 0.33)
                     ),
                     run_centrality=bool(evo.get("run_centrality", False)),
+                    run_neural_hjm=bool(evo.get("run_neural_hjm", False)) and NEURAL_AVAILABLE,
                 )
                 self.chk_evolution.blockSignals(True)
                 self.chk_evolution.setChecked(bool(evo.get("enabled")))
                 self.chk_evolution.blockSignals(False)
-                self.chk_neural_hjm.blockSignals(True)
-                self.chk_neural_hjm.setChecked(
-                    bool(evo.get("run_neural_hjm")) and NEURAL_AVAILABLE
-                )
-                self.chk_neural_hjm.blockSignals(False)
         finally:
             self._loading_settings = False
 
@@ -1890,7 +1995,7 @@ class MainWindow(QMainWindow):
             # Reserved now, started when the residual pass reports back, so the
             # run does not look finished in between.
             self._active_stages.add("evolution")
-            if self.chk_neural_hjm.isChecked() and NEURAL_AVAILABLE:
+            if self._evolution_config.run_neural_hjm and NEURAL_AVAILABLE:
                 self._active_stages.add("neural_evolution")
             self._set_evolution_building()
         else:

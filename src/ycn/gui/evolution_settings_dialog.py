@@ -46,18 +46,21 @@ class EvolutionSettingsDialog(QDialog):
         independent_threshold: float = 0.33,
         max_nodes: int | None = None,
         evolution_enabled: bool = True,
+        neural_available: bool = False,
+        neural_import_error: str = "",
     ) -> None:
-        """
+        """Initialize evolution settings dialog.
+
         Args:
             evolution_enabled: Whether the sidebar's "Run Evolution" is ticked.
-                "Run Centrality" is meaningless without it -- the window loop
-                it hooks into never runs -- so it is disabled and forced off
-                when this is False.
+                "Run Centrality" and "Run Neural-HJM" are meaningless without it.
+            neural_available: Whether the optional 'neural' extra is installed.
+            neural_import_error: Error message if neural is not available.
         """
         super().__init__(parent)
         self.setWindowTitle("Evolution Analysis Settings")
         self.setModal(True)
-        self.resize(400, 380)
+        self.resize(400, 420)
         self.setStyleSheet(APP_STYLE)
         self._force_dark_bg()
 
@@ -66,6 +69,8 @@ class EvolutionSettingsDialog(QDialog):
         )
         self.max_nodes = max_nodes or 20
         self.evolution_enabled = evolution_enabled
+        self.neural_available = neural_available
+        self.neural_import_error = neural_import_error
 
         self._build_form()
 
@@ -143,7 +148,7 @@ class EvolutionSettingsDialog(QDialog):
         )
         self._update_community_spin_state()
 
-        # Per-layer centrality trajectories ("Evo: Centrality").
+        # Per-layer centrality trajectories
         self.chk_run_centrality = QCheckBox("Run Centrality")
         self.chk_run_centrality.setChecked(
             self.initial_config.run_centrality and self.evolution_enabled
@@ -151,14 +156,35 @@ class EvolutionSettingsDialog(QDialog):
         self.chk_run_centrality.setEnabled(self.evolution_enabled)
         self.chk_run_centrality.setToolTip(
             "Also track each component network's per-node centrality across "
-            "the windows, filling the 'Evo: Centrality' tab. Adds one "
+            "the windows, filling the Evo: Centrality tab. Adds one "
             "centrality solve per layer per window; nothing else in the "
             "evolution pass needs it, so it is off by default."
             if self.evolution_enabled
-            else "Tick “Run Evolution” in the sidebar first — this rides on "
+            else "Tick Run Evolution in the sidebar first — this rides on "
             "that pass's window loop."
         )
         form.addRow("Centrality trajectories:", self.chk_run_centrality)
+
+        # Neural-HJM evolution
+        self.chk_run_neural_hjm = QCheckBox("Run Neural-HJM")
+        self.chk_run_neural_hjm.setChecked(
+            self.initial_config.run_neural_hjm and self.evolution_enabled
+        )
+        self.chk_run_neural_hjm.setEnabled(self.evolution_enabled and self.neural_available)
+        if self.neural_available:
+            self.chk_run_neural_hjm.setToolTip(
+                "Also fit the experimental Neural HJM model (needs the neural "
+                "extra) and compute its factor/stress evolution alongside the "
+                "Nelson-Siegel one. Only runs when Run Evolution is also ticked; "
+                "adds a fourth, sequential analysis stage — this is the slowest of "
+                "them, since it trains one small neural net per issuer."
+            )
+        else:
+            self.chk_run_neural_hjm.setToolTip(
+                "Needs the optional neural extra (uv sync --extra neural): "
+                f"{self.neural_import_error}"
+            )
+        form.addRow("Neural-HJM evolution:", self.chk_run_neural_hjm)
 
         # Independent threshold (read-only, informational)
         lbl_threshold = QLabel(f"{self.initial_config.independent_threshold:.2f}")
@@ -211,4 +237,5 @@ class EvolutionSettingsDialog(QDialog):
             measure=self.initial_config.measure,
             edge_settings=self.initial_config.edge_settings,
             run_centrality=self.chk_run_centrality.isChecked(),
+            run_neural_hjm=self.chk_run_neural_hjm.isChecked(),
         )

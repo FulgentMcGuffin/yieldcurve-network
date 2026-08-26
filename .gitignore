@@ -253,3 +253,4 @@ __marimo__/
 .streamlit/secrets.toml
 
 data/ycs_afns_fake.duckdb
+GUI_IMPROVEMENTS_SUMMARY.md

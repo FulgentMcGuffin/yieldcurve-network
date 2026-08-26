@@ -346,7 +346,8 @@ QTabWidget#ResultTabs::pane {{
     background-color: {BG_APP};
     border: 1px solid #2a2f3a;
     border-radius: 8px;
-    top: -1px;
+    top: 0px;
+    border-top: none;
 }}
 QTabWidget#ResultTabs QTabBar::tab {{
     background-color: {BG_SIDEBAR};

@@ -82,6 +82,9 @@ class EvolutionConfig:
             window loop, filling the "Evo: Centrality" tab. Opt-in because it
             adds one centrality solve per layer per window; the structural
             metrics the other evolution tabs need do not require it.
+        run_neural_hjm: Also fit the Neural HJM model and compute its factor/stress
+            evolution alongside Nelson-Siegel. GUI-side control flag; the analysis
+            layer does not use it directly.
     """
 
     window_size: int = 252
@@ -96,6 +99,7 @@ class EvolutionConfig:
     measure: str = "distance_correlation"
     edge_settings: dict | None = None
     run_centrality: bool = False
+    run_neural_hjm: bool = False
 
     def __post_init__(self) -> None:
         if isinstance(self.community_method, str):
