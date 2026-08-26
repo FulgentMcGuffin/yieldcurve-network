@@ -108,6 +108,26 @@ class MLNSettingsDialog(QDialog):
         )
         self._update_community_spin_state()
 
+        # --- Per-component-network tabs -------------------------------------
+        self.spin_degree_bins = QSpinBox()
+        self.spin_degree_bins.setRange(3, 60)
+        self.spin_degree_bins.setValue(self.initial_config.degree_bins)
+        self.spin_degree_bins.setToolTip(
+            "Histogram bins on each MLN: Degree sub-tab. Too many bins on a "
+            "small layer leaves mostly-empty bars; too few hide the shape."
+        )
+        form.addRow("Degree histogram bins:", self.spin_degree_bins)
+
+        self.spin_centrality_top_n = QSpinBox()
+        self.spin_centrality_top_n.setRange(1, 20)
+        self.spin_centrality_top_n.setValue(self.initial_config.centrality_top_n)
+        self.spin_centrality_top_n.setToolTip(
+            "Nodes drawn in each panel of an MLN: Centrality sub-tab — the "
+            "most-variable on top, the least-variable below. Capped per layer "
+            "at half that layer's nodes so the two panels never overlap."
+        )
+        form.addRow("Centrality nodes per panel:", self.spin_centrality_top_n)
+
         layout.addLayout(form)
         layout.addSpacing(12)
 
@@ -148,4 +168,6 @@ class MLNSettingsDialog(QDialog):
             ),
             max_communities=self.spin_max_communities.value(),
             min_nodes=self.initial_config.min_nodes,
+            degree_bins=self.spin_degree_bins.value(),
+            centrality_top_n=self.spin_centrality_top_n.value(),
         )

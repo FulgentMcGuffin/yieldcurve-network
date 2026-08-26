@@ -33,12 +33,12 @@ If you are looking for a more generic network based exploration of datasets (i.e
    - **Conditional Correlation**: Correlation computed only on high-magnitude move days; captures stress-regime linkage distinct from calm-period correlation.
    - **Mutual Information**: Non-linear, non-monotonic dependence detector; entropy-based measure of shared information.
    - **Chatterjee ξ**: Rank-based test for any dependence; computationally cheap alternative to distance correlation.
-   - **FastDTW distance**: Dynamic Time Warping similarity under a Sakoe-Chiba band constraint (radius configurable in **Edge Settings**), so two series that lead/lag each other by a few observations still register as similar — something no correlation measure here can see, since they all compare same-day values.
+   - **DTW / FastDTW distance** *(API only, not in the GUI dropdown — see below)*: Dynamic Time Warping similarity, optionally under a Sakoe-Chiba band constraint, so two series that lead/lag each other by a few observations still register as similar — something no correlation measure here can see, since they all compare same-day values.
    - **Maximal Correlation (ACE)** *(optional, see below)*: Alternating Conditional Expectations, finding nonparametric transformations that maximize correlation.
 4. **Graph Construction and Thresholding**: Prunes weak connections using a user-defined independence threshold to build weighted `NetworkX` graphs, one per layer.
 5. **Multiplex Assembly**: Stacks the per-layer graphs into one graph whose vertices are `(node, layer)` pairs, joining each node to itself across every pair of layers it occurs in.
 6. **Manual Cell Selection**: A mouse-driven term × issuer grid for including or excluding individual `(term, issuer)` series before the networks are built — ragged coverage is the norm in curve data, and this makes it explicit rather than implicit.
-7. **Multi-Layer Metrics and Community Detection**: Per-layer intra/inter edge composition, a node × layer centrality heatmap, and per-layer community detection (ASE + KMeans) with Jaccard alignment so a community ID means the same group of nodes in every layer.
+7. **Multi-Layer Metrics and Community Detection**: Per-layer intra/inter edge composition, a node × layer centrality heatmap, and per-layer community detection (ASE + KMeans) with Jaccard alignment so a community ID means the same group of nodes in every layer. Each component network also gets its own degree distribution and its own rolling centrality trajectories.
 8. **Interactive 3D Multiplex Visualization**: A rotatable Plotly stack, one plane per layer, with layer toggling and click-through to a node table.
 9. **Nelson-Siegel Residual Networks**: Strips the fitted curve from each issuer and networks the idiosyncratic remainder — one network per component network — charted with user-selectable y / shape / fill / size aesthetics.
 10. **Temporal Evolution**: Rebuilds the multiplex in every rolling window and tracks its edge composition, the community count chosen by each of five k-selection methods, Nelson-Siegel factor trajectories with regime classification, and correlation-stress indicators. Factor trajectories are charted both as series against time and as an interactive 3D path through level × slope × curvature space with a date scrubber.
@@ -61,6 +61,10 @@ Point the sidebar at a DuckDB or SQLite file. If the database contains a table c
 | Issuer MLN Centrality  | Issuer MLN Communities |
 |:---:|:---:|
 | ![Issuer Network Centrality](rsrc/images/term_issuer_centrality.png) | ![Issuer Network Communities](rsrc/images/term_issuer_community.png) |
+
+| Degree Distribution  | Centrality (t)  |
+|:---:|:---:|
+| ![Degree Distribution](rsrc/images/issuer_term_degree_distribution_threshold.png) | ![Centrality (t)](rsrc/images/issuer_term_centrality_evolution.png) |
 
 | Edge and Community (t)  | NS Residual Metrics |
 |:---:|:---:|
@@ -175,7 +179,7 @@ Only checked cells reach the network. The selection is a set of `(term, issuer)`
    ┌─────────────────────────┐  log "MLN:"        ──▶  MLN
    │ 1. Multiplex            │                    ──▶  MLN: Metrics
    │    (always runs)        │                    ──▶  MLN: Community
-   └─────────────────────────┘
+   └─────────────────────────┘                    ──▶  MLN: Degree
         │
         ▼
    ┌─────────────────────────┐  log "NS:"         ──▶  NS Residuals
@@ -185,7 +189,8 @@ Only checked cells reach the network. The selection is a set of `(term, issuer)`
         │
         ▼  only if "Run Evolution" is ticked
    ┌─────────────────────────┐  log "Evolution:"  ──▶  Evo: Links
-   │ 3. Evolution            │                    ──▶  Evo: Resids (NS)
+   │ 3. Evolution            │                    ──▶  Evo: Centrality *
+   │                         │                    ──▶  Evo: Resids (NS)
    │    (opt-in, slowest)    │                    ──▶  Evo: Cov (NS)
    └─────────────────────────┘                    ──▶  Evo: Cov(t) (NS)
         │
@@ -198,16 +203,16 @@ Only checked cells reach the network. The selection is a set of `(term, issuer)`
 
 | # | Stage | Gated by | Cost | Tabs it fills |
 |---|---|---|---|---|
-| 1 | **Multiplex** | always | `L × O(n_layer²)` measure evaluations | MLN · MLN: Metrics · MLN: Community |
+| 1 | **Multiplex** | always | `L × O(n_layer²)` measure evaluations | MLN · MLN: Metrics · MLN: Community · MLN: Degree |
 | 2 | **NS residuals** | always | one NS fit per `(issuer, date)` | NS Residuals |
-| 3 | **Evolution** | *Run Evolution* | stage 1 repeated per window, ×5 community methods | Evo: Links · Evo: Resids · Evo: Cov · Evo: Cov(t) |
+| 3 | **Evolution** | *Run Evolution* | stage 1 repeated per window, ×5 community methods | Evo: Links · Evo: Resids · Evo: Cov · Evo: Cov(t) · Evo: Centrality* |
 | 4 | **Neural-HJM evolution** | *Run Evolution* **and** *Run Neural-HJM* | stage 3's factor/stress computations, refit under the Neural HJM model | Evo: Resids · Evo: Cov · Evo: Cov(t) (same three tabs, picked via the **Show** dropdown) |
 
 ### 1. Multiplex thread
 
 Loads the long panel (SQL `WHERE` → date range → User Filter mask), splits it by layer, applies the transforms *per layer*, computes the pairwise measure, thresholds each layer into a graph, and assembles the multiplex. Then derives per-layer intra/inter edge metrics, the node × layer centrality matrix, and Jaccard-aligned communities.
 
-Fills **MLN** (3D multiplex), **MLN: Metrics**, **MLN: Community** — described under [Multi-Layer Network (MLN) Analysis](#multi-layer-network-mln-analysis).
+Fills **MLN** (3D multiplex), **MLN: Metrics**, **MLN: Community** and **MLN: Degree** — described under [Multi-Layer Network (MLN) Analysis](#multi-layer-network-mln-analysis).
 
 ### 2. NS residuals thread
 
@@ -222,8 +227,11 @@ Starts once the NS pass reports back, and only when **Run Evolution** is ticked.
 | Computation | Feeds |
 |---|---|
 | Rebuild the whole multiplex in every rolling window; track edge composition and the *k* chosen by each of the five methods | **Evo: Links** |
+| Per-layer node centrality in every window — *only when **Run Centrality** is also ticked* | **Evo: Centrality** |
 | Nelson-Siegel factors of the market-average curve + Gaussian-mixture regimes | **Evo: Resids** (*Factor* / *Factor Std* / *Factor (t)* / *Factor Std (t)*), NS side |
 | Rolling stability of the residual correlation structure → stress indicators | **Evo: Cov**, **Evo: Cov(t)**, NS side |
+
+\* **Evo: Centrality** carries a second gate: it fills only when **Run Centrality** is also ticked in **Evolution Settings**. It rides on this stage's window loop but adds one centrality solve per layer per window, and nothing else in the pass needs it, so it is off by default.
 
 Note that this stage builds **its own** NS residual cube for the stress computation rather than reusing stage 2's. The two are computed twice; sharing them is an obvious future saving.
 
@@ -292,8 +300,10 @@ Layers may share few nodes, or none — that is a property of the data, not a fa
 | **Jaccard similarity** | 0.60 | Minimum member overlap for two per-layer communities to be treated as the *same* community across layers |
 | **Community method** | fixed | k-selection strategy per layer (see below) |
 | **Max communities** | 10 | For `fixed`: exact k per layer. For the optimisation methods: upper bound of the search. Also the ceiling on the total distinct communities **MLN: Community** shows after cross-layer alignment — see below. |
+| **Degree histogram bins** | 15 | Bins on each **MLN: Degree** sub-tab. Too many on a small layer leaves mostly-empty bars; too few hide the shape. |
+| **Centrality nodes per panel** | 10 | Nodes drawn in each panel of an **Evo: Centrality** sub-tab. Capped per layer at half that layer's node count, so the most- and least-variable panels never show the same node twice. |
 
-Alongside it, the main sidebar carries the **connection measure** (plus measure-specific **Edge Settings**, e.g. the stress-regime quantile for conditional correlation or the Sakoe-Chiba band radius for FastDTW), the **transforms**, the **date range**, and the **independence threshold** (default 0.33 — keep edges where the measure ≥ threshold).
+Alongside it, the main sidebar carries the **connection measure** (plus measure-specific **Edge Settings**, e.g. the stress-regime quantile for conditional correlation), the **transforms**, the **date range**, and the **independence threshold** (default 0.33 — keep edges where the measure ≥ threshold).
 
 ### Community Detection Methods
 
@@ -340,11 +350,26 @@ The node × layer community heatmap, coloured by the **Jaccard-aligned global co
 
 Colours come from a 10-colour curated palette that matches the notebooks, extended automatically (via `tab20`/`tab20b`, then a sampled continuous colormap as a last resort) whenever there are more communities than that to distinguish — so raising **Max communities** past 10 does not start repeating colours across unrelated communities.
 
+#### MLN: Degree
+
+The three tabs above describe the multiplex *as a whole*. This one goes the other way: **one sub-tab per component network**, named after its layer, each showing that layer's own degree distribution — a `seaborn` histogram with a KDE overlay, the mean marked, and the nodes at the minimum, maximum and modal degree labelled on their bars. **Hover** any bar for its degree, count and the nodes in it.
+
+Reading across the sub-tabs answers a question the pooled view cannot: *does connectivity have the same shape at every maturity?* A short-end layer that is nearly complete while the 30Y layer is sparse is a real structural fact about the panel, and it is invisible in any single aggregate number.
+
+Isolated nodes are kept at degree 0 rather than dropped — a node present in the layer but connected to nothing is exactly the kind of node worth noticing, and dropping it would bias the distribution.
+
+A **threshold slider** sits beneath each histogram. Dragging it re-thresholds that layer's connection-measure matrix and redraws the distribution in place, so you can watch connectivity fill in or collapse as the edge cutoff moves — without leaving the tab or rebuilding the network. The slider spans `[0, 1]` for measures already normalised to that range and `[-1, 1]` for signed correlations, and starts at the **independence threshold** the network was built with. It affects *this chart only*; the built multiplex, and every other tab, are unchanged. The eye button follows the slider, so the table always matches the histogram on screen.
+
+Because the slider needs the raw, **un-thresholded** measure matrix — which a thresholded graph cannot give back — it is unavailable on a [reloaded session](#saving-and-reloading-an-analysis), where the archive stores edges rather than measures. The histogram itself still renders there; only the slider is absent.
+
+Each layer's graph is rebuilt from the multiplex intra-layer edge table, so this tab is filled by [stage 1](#1-multiplex-thread) and comes back intact from a [reloaded session](#saving-and-reloading-an-analysis) with nothing extra stored. Only the visible sub-tab is rendered; the others draw when you open them, so a 15-layer panel does not pay for 15 histograms up front.
+
 ### Performance Considerations
 
 - Cost is `L × O(n_layer²)` measure evaluations for `L` layers. Layering is usually *cheaper* than one pooled network, since `(Σnᵢ)² > Σnᵢ²`.
 - **Issuer Network by Term** is the cheaper direction on a typical panel: ~10–15 term layers over ~15–40 issuer nodes. **Term Network by Issuer** inverts that — many small layers — and the log warns past 12 layers.
-- Expensive measures (distance correlation, mutual information, FastDTW) multiply across layers. Prefer Spearman, Kendall Tau or Chatterjee ξ while exploring, then re-run with the expensive one. FastDTW's per-pair cost is `O(n × radius)`, not `O(n²)` like plain DTW, but it is still a pure-Python nested loop rather than a vectorised measure, so it is the slowest of the GUI-selectable options at anything beyond a small radius. Plain (non-windowed) DTW stays API-only for this reason — it has no radius to bound it.
+- Expensive measures (distance correlation, mutual information) multiply across layers. Prefer Spearman, Kendall Tau or Chatterjee ξ while exploring, then re-run with the expensive one.
+- **Both DTW variants are deliberately absent from the connection-measure dropdown.** Raw DTW is `O(n²)` per pair with no windowing; FastDTW's Sakoe-Chiba band cuts that to `O(n × radius)`, but both are pure-Python nested loops rather than vectorised measures, so on a real panel they are far slower than anything else on offer. They stay reachable through `analysis.measures.compute_measure()` for programmatic use, where that trade-off is made deliberately — `fastdtw_distance` reads its radius from the `fastdtw_radius` edge setting.
 - **Smoke test first**: run on a truncated date range before committing to full history.
 
 ## NS Residuals
@@ -366,18 +391,26 @@ This is [stage 2](#2-ns-residuals-thread): a single snapshot over the configured
 
 ## Network Evolution
 
-[Stage 3](#3-evolution-thread). Tick **Run Evolution** to rebuild the whole multiplex inside every rolling window and track how it changes. Four tabs:
+[Stage 3](#3-evolution-thread). Tick **Run Evolution** to rebuild the whole multiplex inside every rolling window and track how it changes. Four tabs, plus **Evo: Centrality** behind its own **Run Centrality** box (below):
 
 - **Evo: Links** — intra/inter edge counts and composition over time, and the community count *k* that each of the five k-selection methods picks per window. Because each window's *k* depends only on that window, there is no lookahead.
 - **Evo: Resids** — four sub-tabs over the same factor frame. *Factor* and *Factor Std* chart level, slope and curvature of the market-average curve and their within-window volatility as three series against time, shaded by a Gaussian-mixture regime label. *Factor (t)* and *Factor Std (t)* plot the **same numbers as one path through level × slope × curvature space** — see [3D factor trajectories](#3d-factor-trajectories-factor-t--factor-std-t).
 - **Evo: Cov** — the four correlation-stress indicators, one per quadrant: average |correlation|, its variance, the count of strongly correlated pairs, and a 0–100 stress indicator.
 - **Evo: Cov(t)** — a dotted time trajectory through any two of those four series. Stressed windows (indicator > 50) are ringed and the endpoints are labelled. Selection is **bidirectional**: drag the date slider to walk a cursor along the path, or click a point on the chart to jump the slider to that date. The two axes can never carry the same series: picking the one already on the other axis swaps them.
 
-All four tabs use the **window size and step from the Evolution Settings dialog** — the multiplex windows, the factor trajectories and the stress indicators alike. A smaller step gives proportionally more points on every one of them.
+All of them use the **window size and step from the Evolution Settings dialog** — the multiplex windows, the factor trajectories and the stress indicators alike. A smaller step gives proportionally more points on every one of them.
 
 Bear in mind that the step controls cost as well as resolution: halving it doubles the number of multiplex rebuilds, and each rebuild is a full set of per-layer correlation matrices plus five community detections.
 
 This is much slower than a single multiplex — it is `n_windows` multiplex builds plus five community detections each — which is why it is opt-in and runs after stage 2.
+
+### Evo: Centrality
+
+Sits directly right of **NS Residuals**. Again **one sub-tab per component network**, but these are *trajectories*: for each layer, the centrality of its nodes tracked across the rolling windows. Two stacked panels per layer — the **most variable** nodes on top, the **least variable** below — so a node whose importance within its own maturity swings around is separated from one that simply sits still. **Hover** a line to highlight it and read its value.
+
+The centrality is whichever measure **MLN Settings** selects, and the node count per panel is **Centrality nodes per panel** (capped at half the layer's nodes so the two panels cannot show the same node twice).
+
+Because this is a trajectory it needs windows, which is why it is an `Evo:` tab rather than an `MLN:` one: it is filled by [stage 3](#3-evolution-thread) and needs **both** **Run Evolution** (sidebar) and **Run Centrality** (Evolution Settings). The second box is disabled, and forced off, while Run Evolution is unticked. The per-layer centralities are collected inside the window loop that already rebuilds each layer's graph, so the tab costs one extra centrality solve per layer per window and no additional network builds.
 
 ### Switching curve models: the Show dropdown
 
@@ -446,7 +479,7 @@ A [reloaded session](#saving-and-reloading-an-analysis) repopulates these two ta
 ### Time-Series Alignment (DTW)
 
 * **Dynamic Time Warping (DTW)**: Distance between two sequences that allows non-linear stretching along the time axis, so a shape match survives a lead/lag that a same-day comparison (correlation) would miss: [Wikipedia](https://en.wikipedia.org/wiki/Dynamic_time_warping).
-  - **Sakoe-Chiba Band**: The windowed alignment constraint used here to bound how far a match can shift, which is what keeps this project's `fastdtw_distance` measure at `O(n × radius)` per pair instead of raw DTW's `O(n²)`: Sakoe, H., & Chiba, S. (1978). *"Dynamic programming algorithm optimization for spoken word recognition."* IEEE Transactions on Acoustics, Speech, and Signal Processing, 26(1), 43-49: [DOI (IEEE)](https://doi.org/10.1109/TASSP.1978.1163055).
+  - **Sakoe-Chiba Band**: The windowed alignment constraint used here to bound how far a match can shift, which is what keeps this project's API-level `fastdtw_distance` measure at `O(n × radius)` per pair instead of raw DTW's `O(n²)`: Sakoe, H., & Chiba, S. (1978). *"Dynamic programming algorithm optimization for spoken word recognition."* IEEE Transactions on Acoustics, Speech, and Signal Processing, 26(1), 43-49: [DOI (IEEE)](https://doi.org/10.1109/TASSP.1978.1163055).
   - **FastDTW**: Origin of the name and the general approximate-DTW-via-windowing approach implemented here: Salvador, S., & Chan, P. (2007). *"FastDTW: Toward accurate dynamic time warping in linear time and space."* Intelligent Data Analysis, 11(5), 561-580: [DOI (IOS Press)](https://doi.org/10.3233/IDA-2007-11508).
 
 ### Community Detection & Clustering

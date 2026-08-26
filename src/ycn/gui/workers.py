@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import threading
 import time
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date
 
 from matplotlib.figure import Figure
@@ -135,6 +135,13 @@ class MLNResult:
     community_df: pl.DataFrame
     metrics_fig: Figure
     community_fig: Figure
+    # Per-layer un-thresholded measure matrices, keyed by layer value. Feeds
+    # the MLN: Degree tab's threshold slider, which re-thresholds a layer
+    # without recomputing its (expensive) measure. Empty on a restored
+    # session -- the slider is then simply unavailable, since the archive
+    # stores thresholded edges, not measures.
+    layer_measures: dict[str, pl.DataFrame] = field(default_factory=dict)
+    independent_threshold: float = 0.33
 
 
 class PipelineWorker(_ThrottledProgressMixin, QObject):
@@ -419,6 +426,7 @@ class MLNWorker(_ThrottledProgressMixin, QObject):
                     f"{cfg.measure} computation, so this may take a while."
                 )
 
+            layer_measures: dict[str, pl.DataFrame] = {}
             layer_graphs = build_layer_graphs(
                 df,
                 cfg,
@@ -427,6 +435,7 @@ class MLNWorker(_ThrottledProgressMixin, QObject):
                 progress=self._progress_wrapper,
                 status=self._status_wrapper,
                 edge_settings=self._edge_settings,
+                measures_out=layer_measures,
             )
 
             self._status_wrapper("MLN: assembling multiplex network")
@@ -493,6 +502,8 @@ class MLNWorker(_ThrottledProgressMixin, QObject):
                     community_df=community_df,
                     metrics_fig=metrics_fig,
                     community_fig=community_fig,
+                    layer_measures=layer_measures,
+                    independent_threshold=cfg.independent_threshold,
                 )
             )
         except WorkerCancelled:
@@ -526,6 +537,7 @@ class MLNEvolutionResult:
     edge_types: pl.DataFrame
     community_k: pl.DataFrame
     communities: pl.DataFrame
+    layer_metrics: pl.DataFrame
     factors: pl.DataFrame
     regimes: pl.DataFrame
     stress: pl.DataFrame
@@ -670,7 +682,7 @@ class MLNEvolutionWorker(_ThrottledProgressMixin, QObject):
                 self.failed.emit("No rows remain for the evolution analysis.")
                 return
 
-            edge_types, community_k, communities, _windows = (
+            edge_types, community_k, communities, layer_metrics, _windows = (
                 compute_multiplex_evolution(
                     long,
                     cfg,
@@ -730,6 +742,7 @@ class MLNEvolutionWorker(_ThrottledProgressMixin, QObject):
                 edge_types=edge_types,
                 community_k=community_k,
                 communities=communities,
+                layer_metrics=layer_metrics,
                 factors=factors,
                 regimes=regimes,
                 stress=stress,

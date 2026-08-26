@@ -83,6 +83,7 @@ def capture_evolution(session: Session, result: MLNEvolutionResult) -> None:
             f"{EVOLUTION}.edge_types": result.edge_types,
             f"{EVOLUTION}.community_k": result.community_k,
             f"{EVOLUTION}.communities": result.communities,
+            f"{EVOLUTION}.layer_metrics": result.layer_metrics,
             f"{EVOLUTION}.factors": result.factors,
             f"{EVOLUTION}.regimes": result.regimes,
             f"{EVOLUTION}.stress": result.stress,
@@ -208,6 +209,9 @@ def restore_evolution(session: Session) -> MLNEvolutionResult | None:
         edge_types=edge_types,
         community_k=community_k,
         communities=session.frame(f"{EVOLUTION}.communities"),
+        # Absent from archives written before MLN: Centrality existed; an empty
+        # frame simply leaves that tab on its placeholder.
+        layer_metrics=session.frame(f"{EVOLUTION}.layer_metrics"),
         factors=factors,
         regimes=regimes,
         stress=stress,

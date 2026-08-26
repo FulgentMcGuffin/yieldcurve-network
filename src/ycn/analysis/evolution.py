@@ -78,6 +78,10 @@ class EvolutionConfig:
         edge_settings: Optional measure-specific parameters (e.g.
             ``{"conditional_quantile": 0.9}``), passed through to
             ``measures.compute_measure``.
+        run_centrality: Collect per-layer, per-node centrality inside the
+            window loop, filling the "Evo: Centrality" tab. Opt-in because it
+            adds one centrality solve per layer per window; the structural
+            metrics the other evolution tabs need do not require it.
     """
 
     window_size: int = 252
@@ -91,6 +95,7 @@ class EvolutionConfig:
     community_method: CommunityMethod = CommunityMethod.FIXED
     measure: str = "distance_correlation"
     edge_settings: dict | None = None
+    run_centrality: bool = False
 
     def __post_init__(self) -> None:
         if isinstance(self.community_method, str):

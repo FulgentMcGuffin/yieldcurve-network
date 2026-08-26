@@ -119,33 +119,18 @@ class EdgeSettingsDialog(QDialog):
 
         layout.addWidget(conditional_group)
 
-        # FastDTW Group
-        fastdtw_group = QGroupBox("FastDTW Settings")
-        fastdtw_layout = QFormLayout(fastdtw_group)
-
-        lbl_radius = QLabel("Sakoe-Chiba Band Radius:")
-        lbl_radius.setToolTip(
-            "Window width for approximate DTW computation. Smaller = faster but less accurate. "
-            "Typical range: 1-5. Default 2 balances speed and accuracy."
-        )
-        self.spin_fastdtw_radius = QDoubleSpinBox()
-        self.spin_fastdtw_radius.setMinimum(1)
-        self.spin_fastdtw_radius.setMaximum(10)
-        self.spin_fastdtw_radius.setSingleStep(1)
-        self.spin_fastdtw_radius.setDecimals(0)
-        self.spin_fastdtw_radius.setValue(self.config.fastdtw_radius)
-
-        fastdtw_layout.addRow(lbl_radius, self.spin_fastdtw_radius)
-
-        layout.addWidget(fastdtw_group)
+        # No FastDTW group: both DTW variants are excluded from the GUI's
+        # connection-measure dropdown (see measures._MEASURE_GUI_DISABLED), so
+        # a radius control here could never affect a run. The
+        # ``fastdtw_radius`` field is still carried on the config -- it round
+        # trips through saved sessions and is read by API callers of
+        # ``compute_measure`` -- it simply has no widget.
 
         # Info text
         info = QLabel(
             "Configure parameters for connection measures that accept optional settings.\n\n"
             "• Conditional Correlation: Isolates correlation during market stress "
-            "(extreme return days)\n"
-            "• FastDTW: Similarity that tolerates a lead/lag between two series, "
-            "not just same-day co-movement"
+            "(extreme return days)"
         )
         info.setStyleSheet("color: #94a3b8; font-size: 9px;")
         info.setWordWrap(True)
@@ -183,14 +168,18 @@ class EdgeSettingsDialog(QDialog):
         layout.addLayout(button_layout)
 
     def _reset_to_defaults(self) -> None:
-        """Reset all settings to defaults."""
+        """Reset every setting that has a widget."""
         defaults = EdgeSettingsConfig()
         self.spin_conditional_quantile.setValue(defaults.conditional_quantile)
-        self.spin_fastdtw_radius.setValue(defaults.fastdtw_radius)
 
     def get_config(self) -> EdgeSettingsConfig:
-        """Return configured EdgeSettingsConfig."""
+        """Return configured EdgeSettingsConfig.
+
+        ``fastdtw_radius`` has no widget (see ``_build``) so it is carried
+        through from the incoming config rather than reset, keeping a value
+        set via the API or restored from a session intact.
+        """
         return EdgeSettingsConfig(
             conditional_quantile=float(self.spin_conditional_quantile.value()),
-            fastdtw_radius=int(self.spin_fastdtw_radius.value()),
+            fastdtw_radius=self.config.fastdtw_radius,
         )

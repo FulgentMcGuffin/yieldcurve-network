@@ -49,6 +49,11 @@ class MLNConfig:
             the ceiling on the total distinct ids the MLN: Community tab shows
             after cross-layer alignment (see ``layer_community_matrix``).
         min_nodes: Layers with fewer nodes are skipped for community detection.
+        degree_bins: Histogram bins on each MLN: Degree sub-tab.
+        centrality_top_n: Nodes drawn in each panel of an MLN: Centrality
+            sub-tab (most-variable on top, least-variable below). Capped per
+            layer at half that layer's node count, since the two panels must
+            not overlap -- see ``evolution_viz.render_centrality_trajectories``.
     """
 
     layer_column: str
@@ -57,6 +62,8 @@ class MLNConfig:
     community_method: CommunityMethod = CommunityMethod.FIXED
     max_communities: int = 10
     min_nodes: int = 3
+    degree_bins: int = 15
+    centrality_top_n: int = 10
 
     def __post_init__(self) -> None:
         if isinstance(self.community_method, str):
@@ -121,8 +128,14 @@ def build_layer_graphs(
     progress: ProgressCallback | None = None,
     status: StatusCallback | None = None,
     edge_settings: dict | None = None,
+    measures_out: dict[str, pl.DataFrame] | None = None,
 ) -> dict[str, nx.Graph]:
     """One correlation network per layer, using the single network's settings.
+
+    ``measures_out``, if given, is populated with each layer's **un-thresholded**
+    measure matrix. That is what lets the MLN: Degree tab re-threshold a layer
+    from its slider without recomputing the measure -- the graphs returned here
+    have already had the threshold applied and cannot be un-applied.
 
     Per layer: subset -> transform -> pivot wide -> measure -> threshold. The
     subset-then-transform ordering is required for correctness (see
@@ -179,6 +192,8 @@ def build_layer_graphs(
             progress=_layer_progress,
             edge_settings=edge_settings,
         )
+        if measures_out is not None:
+            measures_out[value] = measure_df
         graphs[value] = build_corr_nx(
             measure_df, independent_threshold=cfg.independent_threshold
         )

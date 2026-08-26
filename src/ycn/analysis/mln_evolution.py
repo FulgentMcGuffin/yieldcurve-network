@@ -36,6 +36,7 @@ from .mln import (
     build_multilayer_network,
     layer_values_of,
 )
+from .mln_layer_metrics import layer_metrics_frame, layer_node_metric_rows
 from .multilayer_communities import METHOD_LABELS, detect_multilayer_communities
 from .network import pivot_to_wide
 from .residual_networks import (
@@ -133,13 +134,20 @@ def compute_multiplex_evolution(
     edge_settings: dict | None = None,
     progress: ProgressCallback | None = None,
     status: StatusCallback | None = None,
-) -> tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame, list[tuple[date, date]]]:
-    """Rebuild the multiplex per window; track edge types and community k.
+) -> tuple[
+    pl.DataFrame, pl.DataFrame, pl.DataFrame, pl.DataFrame, list[tuple[date, date]]
+]:
+    """Rebuild the multiplex per window; track edge types, community k, centrality.
 
-    Returns ``(edge_types, community_k, communities, windows)``. Community
-    detection runs all five k-selection methods on every window so the
+    Returns ``(edge_types, community_k, communities, layer_metrics, windows)``.
+    Community detection runs all five k-selection methods on every window so the
     "#Communities by Method" panel can compare them; each window's k depends
     only on that window, so there is no lookahead.
+
+    ``layer_metrics`` is the per-layer, per-node centrality path behind the
+    "MLN: Centrality" tab. It is collected here rather than in its own pass
+    because this loop already holds every window's layer graphs -- recomputing
+    them elsewhere would double the most expensive part of the run.
     """
     schedule = _window_bounds(long, cfg.date_column, evo)
     if not schedule:
@@ -153,6 +161,7 @@ def compute_multiplex_evolution(
     edge_rows: list[dict] = []
     k_rows: list[dict] = []
     community_rows: list[dict] = []
+    layer_metric_rows: list[dict] = []
     windows: list[tuple[date, date]] = []
     total = len(schedule)
 
@@ -184,6 +193,17 @@ def compute_multiplex_evolution(
             edge_settings=edge_settings,
         )
         multiplex = build_multilayer_network(layer_graphs, values)
+
+        # Per-layer centrality for this window, for the Evo: Centrality tab.
+        # Opt-in ("Run Centrality"): cheap next to the correlation matrices
+        # already computed above, but it is one solve per layer per window and
+        # nothing else in this pass needs it.
+        if evo.run_centrality:
+            layer_metric_rows.extend(
+                layer_node_metric_rows(
+                    layer_graphs, as_date(end), centrality=mcfg.centrality
+                )
+            )
 
         intra = sum(
             1 for _, _, d in multiplex.edges(data=True) if d.get("layer") == "intra"
@@ -252,7 +272,13 @@ def compute_multiplex_evolution(
             (100.0 * pl.col("intra_edges") / pl.col("total_edges")).alias("pct_intra"),
             (100.0 * pl.col("inter_edges") / pl.col("total_edges")).alias("pct_inter"),
         )
-    return edge_types, pl.DataFrame(k_rows), pl.DataFrame(community_rows), windows
+    return (
+        edge_types,
+        pl.DataFrame(k_rows),
+        pl.DataFrame(community_rows),
+        layer_metrics_frame(layer_metric_rows),
+        windows,
+    )
 
 
 def compute_curve_factors(

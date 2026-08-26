@@ -67,7 +67,10 @@ from ycn.analysis.measures import (
     available_measures,
     measure_short_label,
 )
+from ycn.analysis.degree_hist import render_degree_histogram
+from ycn.analysis.evolution_viz import render_centrality_trajectories
 from ycn.analysis.mln import MLNConfig
+from ycn.analysis.mln_layer_metrics import layer_subgraph, metrics_for_layer
 from ycn.analysis.session import (
     FILE_FILTER,
     SUFFIX,
@@ -89,7 +92,13 @@ from ycn.analysis.yield_curve import (
 )
 from ycn.gui.evolution_settings_dialog import EvolutionSettingsDialog
 from ycn.gui.data_table_dialog import DataTableDialog, eye_icon
+from ycn.gui.degree_threshold_slider import build_threshold_slider
 from ycn.gui.factor_trajectory_tab import FactorTrajectoryTab
+from ycn.gui.layer_figure_tabs import (
+    LayerFigureTabs,
+    attach_histogram_cursor,
+    attach_line_cursor,
+)
 from ycn.gui.mln_bridge import (
     MLNBridge,
     MLNWebPage,
@@ -200,6 +209,10 @@ class MainWindow(QMainWindow):
         self._retired_workers: list[tuple] = []
         self._last_config: PipelineConfig | None = None
         self._mln_row_of: dict[tuple[str, str], int] = {}
+        # layer -> (threshold, degrees) once its MLN: Degree slider has been
+        # moved, so the eye button reports what is drawn rather than the
+        # threshold the network was built at.
+        self._degree_at_threshold: dict[str, tuple[float, dict]] = {}
         self._mln_bridge = MLNBridge()
         self._mln_channel: QWebChannel | None = None
         # Which layer values were checked in "VISIBLE LAYERS" last time, so a
@@ -552,8 +565,38 @@ class MainWindow(QMainWindow):
         self._set_mln_community_placeholder()
         self.tabs.addTab(mln_comm_page, "MLN: Community")
 
+        # Per-component-network views: one sub-tab per layer. Degree comes
+        # straight off the multiplex edge tables, so it lands with the MLN
+        # stage; centrality is a *trajectory* and therefore needs the
+        # rolling-window pass, so it stays empty until Run Evolution is ticked.
+        self.tab_mln_degree = LayerFigureTabs(
+            empty_message=(
+                "Per-layer degree histograms will appear here after you build "
+                "a network."
+            ),
+            on_error=lambda msg: self._append_log(f"MLN: Degree — {msg}"),
+            attach_cursor=attach_histogram_cursor,
+            build_controls=self._build_degree_threshold_slider,
+        )
+        self.tab_mln_degree.currentChanged.connect(self._update_view_data_button)
+        self.tabs.addTab(self.tab_mln_degree, "MLN: Degree")
+
         self.tab_ns = NSResidualsTab(self._show_coverage)
         self.tabs.addTab(self.tab_ns, "NS Residuals")
+
+        # Per-layer centrality *trajectories*, so this belongs to the
+        # rolling-window pass, not the single multiplex -- hence the "Evo:"
+        # prefix and its own "Run Centrality" box in Evolution Settings.
+        self.tab_evo_centrality = LayerFigureTabs(
+            empty_message=(
+                "Per-layer centrality trajectories are opt-in: tick “Run "
+                "Evolution”, then “Run Centrality” in Evolution Settings."
+            ),
+            on_error=lambda msg: self._append_log(f"Evo: Centrality — {msg}"),
+            attach_cursor=attach_line_cursor,
+        )
+        self.tab_evo_centrality.currentChanged.connect(self._update_view_data_button)
+        self.tabs.addTab(self.tab_evo_centrality, "Evo: Centrality")
 
         self.evo_links_layout, links_page = self._figure_page()
         self.tabs.addTab(links_page, "Evo: Links")
@@ -808,6 +851,42 @@ class MainWindow(QMainWindow):
             if title == "MLN: Metrics":
                 return title, self._mln_result.centrality_df
             return title, self._mln_result.community_df
+
+        if title == "MLN: Degree":
+            layer = self.tab_mln_degree.current_layer()
+            if self._mln_result is None or layer is None:
+                return None
+            # Prefer what the threshold slider last drew: the table must match
+            # the histogram on screen, not the threshold the network was built
+            # at.
+            moved = self._degree_at_threshold.get(layer)
+            if moved is not None:
+                threshold, degrees = moved
+                label = f"{title} — {layer} (threshold {threshold:.2f})"
+            else:
+                graph = layer_subgraph(
+                    self._mln_result.nodes, self._mln_result.intra, layer
+                )
+                degrees = dict(graph.degree())
+                label = f"{title} — {layer}"
+            if not degrees:
+                return None
+            return label, pl.DataFrame(
+                {
+                    "node": [str(n) for n in degrees],
+                    "degree": [int(d) for d in degrees.values()],
+                }
+            ).sort("degree", descending=True)
+
+        if title == "Evo: Centrality":
+            layer = self.tab_evo_centrality.current_layer()
+            evo = self._evolution_result
+            if evo is None or layer is None:
+                return None
+            frame = metrics_for_layer(evo.layer_metrics, layer)
+            if frame.is_empty():
+                return None
+            return f"{title} — {layer}", frame
 
         if title == "NS Residuals":
             residual = self._residual_result
@@ -1265,6 +1344,10 @@ class MainWindow(QMainWindow):
         )
         if self._last_config is not None:
             self._evolution_config.measure = self._last_config.measure
+        # "Run Centrality" rides on the evolution window loop, so it cannot
+        # survive that pass being switched off.
+        if not self.chk_evolution.isChecked():
+            self._evolution_config.run_centrality = False
 
     def _show_evolution_settings(self) -> None:
         self._sync_evolution_from_sidebar()
@@ -1272,6 +1355,7 @@ class MainWindow(QMainWindow):
             self,
             initial_config=self._evolution_config,
             independent_threshold=float(self.spin_threshold.value()),
+            evolution_enabled=self.chk_evolution.isChecked(),
         )
         if dialog.exec() == QDialog.DialogCode.Accepted:
             self._evolution_config = dialog.get_config()
@@ -1280,7 +1364,8 @@ class MainWindow(QMainWindow):
                 f"step={self._evolution_config.step}, "
                 f"expanding={self._evolution_config.expanding}, "
                 f"edge threshold={self._evolution_config.independent_threshold:.2f}, "
-                f"centrality={self._evolution_config.centrality}"
+                f"centrality={self._evolution_config.centrality}, "
+                f"run_centrality={self._evolution_config.run_centrality}"
             )
 
     def _on_evolution_checkbox_toggled(self, checked: bool) -> None:
@@ -1290,6 +1375,7 @@ class MainWindow(QMainWindow):
         )
         if not checked:
             self.chk_neural_hjm.setChecked(False)
+            self._evolution_config.run_centrality = False
 
     def _show_edge_settings(self) -> None:
         from ycn.gui.edge_settings_dialog import EdgeSettingsDialog
@@ -1339,6 +1425,8 @@ class MainWindow(QMainWindow):
                 "community_method": self._mln_config.community_method.value,
                 "max_communities": self._mln_config.max_communities,
                 "min_nodes": self._mln_config.min_nodes,
+                "degree_bins": self._mln_config.degree_bins,
+                "centrality_top_n": self._mln_config.centrality_top_n,
             },
             "evolution": {
                 "enabled": self.chk_evolution.isChecked(),
@@ -1351,6 +1439,7 @@ class MainWindow(QMainWindow):
                 "n_top_nodes": self._evolution_config.n_top_nodes,
                 "max_communities": self._evolution_config.max_communities,
                 "community_method": self._evolution_config.community_method.value,
+                "run_centrality": self._evolution_config.run_centrality,
             },
         }
 
@@ -1462,6 +1551,8 @@ class MainWindow(QMainWindow):
                     community_method=mln.get("community_method", "fixed"),
                     max_communities=int(mln.get("max_communities", 10)),
                     min_nodes=int(mln.get("min_nodes", 3)),
+                    degree_bins=int(mln.get("degree_bins", 15)),
+                    centrality_top_n=int(mln.get("centrality_top_n", 10)),
                 )
 
             evo = settings.get("evolution") or {}
@@ -1478,6 +1569,7 @@ class MainWindow(QMainWindow):
                     independent_threshold=float(
                         settings.get("independent_threshold", 0.33)
                     ),
+                    run_centrality=bool(evo.get("run_centrality", False)),
                 )
                 self.chk_evolution.blockSignals(True)
                 self.chk_evolution.setChecked(bool(evo.get("enabled")))
@@ -1573,6 +1665,9 @@ class MainWindow(QMainWindow):
             self._render_mln_view()
             self._show_mln_metrics(self._mln_result.metrics_fig)
             self._show_mln_community(self._mln_result.community_fig)
+            # Rebuilt from the restored edge tables, so a loaded analysis gets
+            # the same histograms as a fresh run with nothing extra stored.
+            self._populate_mln_degree(self._mln_result)
 
         self._residual_result = restore_residual(session)
         if self._residual_result is not None:
@@ -1585,6 +1680,7 @@ class MainWindow(QMainWindow):
         self._evolution_result = restore_evolution(session)
         if self._evolution_result is not None:
             self._show_figure(self.evo_links_layout, self._evolution_result.links_fig)
+            self._populate_evo_centrality(self._evolution_result)
 
         self._neural_evolution_result = restore_neural_evolution(session)
         self._set_neural_source_available(self._neural_evolution_result is not None)
@@ -2008,6 +2104,7 @@ class MainWindow(QMainWindow):
             return
         self._evolution_result = result
         self._show_figure(self.evo_links_layout, result.links_fig)
+        self._populate_evo_centrality(result)
         self._render_resid_source()
         self._append_log(
             f"Evolution rendered: {result.edge_types.height} window(s), "
@@ -2100,6 +2197,15 @@ class MainWindow(QMainWindow):
             self.evo_cov_layout,
         ):
             self._evolution_placeholder(layout, text)
+        # Evo: Centrality is gated on a second box, so the generic "tick Run
+        # Evolution" text would send the user to the wrong control.
+        if not self._evolution_config.run_centrality:
+            self.tab_evo_centrality.set_placeholder(
+                "Tick “Run Evolution” in the sidebar and “Run Centrality” in "
+                "Evolution Settings to compute this."
+            )
+        else:
+            self.tab_evo_centrality.set_placeholder(text)
         self.tab_factor_t.set_placeholder(text)
         self.tab_factor_std_t.set_placeholder(text)
         self.tab_cov_t.set_placeholder(text)
@@ -2320,15 +2426,18 @@ class MainWindow(QMainWindow):
         """Put the MLN tabs into their 'computing' state."""
         self._set_mln_metrics_placeholder("Computing multi-layer network...")
         self._set_mln_community_placeholder("Computing multi-layer network...")
+        self.tab_mln_degree.set_placeholder("Computing multi-layer network...")
         self.mln_web.setHtml(
             self._mln_placeholder_html("Computing multi-layer network...")
         )
 
     def _clear_mln_tabs(self, message: str | None = None) -> None:
-        """Clear all three MLN tabs and drop any cached result."""
+        """Clear every MLN tab and drop any cached result."""
         text = message or "No multi-layer network yet."
         self._set_mln_metrics_placeholder(text)
         self._set_mln_community_placeholder(text)
+        self._degree_at_threshold.clear()
+        self.tab_mln_degree.set_placeholder(text)
         self.mln_web.setHtml(self._mln_placeholder_html(text))
         self.lst_mln_layers.blockSignals(True)
         self.lst_mln_layers.clear()
@@ -2357,6 +2466,106 @@ class MainWindow(QMainWindow):
             canvas.draw()
         except Exception as exc:  # noqa: BLE001
             self._append_log(f"MLN community display error: {exc}")
+
+    # ------------------------------------------------- per-layer (component) tabs
+    def _populate_mln_degree(self, result: MLNResult) -> None:
+        """Point the MLN: Degree sub-tabs at this run's component networks.
+
+        The renderer closes over the multiplex tables rather than pre-building
+        every layer's graph, so a 15-layer panel costs one histogram, not 15,
+        until the user actually opens the other sub-tabs.
+        """
+
+        def render(layer: str) -> Figure | None:
+            graph = layer_subgraph(result.nodes, result.intra, layer)
+            if graph.number_of_nodes() == 0:
+                return None
+            return render_degree_histogram(
+                graph,
+                f"Degree Histogram — {result.layer_column} = {layer}",
+                bins=self._mln_config.degree_bins,
+            )
+
+        self._degree_at_threshold.clear()
+        self.tab_mln_degree.set_layers(list(result.layer_values), render)
+
+    def _build_degree_threshold_slider(
+        self, layer: str, figure: Figure, canvas: FigureCanvas
+    ) -> QWidget | None:
+        """The live threshold slider under one MLN: Degree histogram.
+
+        Returns None when this layer's measure matrix is unavailable — which
+        is the case for a restored session, since the archive stores
+        thresholded edges rather than measures. The histogram itself still
+        works; only the slider is absent.
+        """
+        result = self._mln_result
+        if result is None:
+            return None
+        measure_df = result.layer_measures.get(layer)
+        if measure_df is None or measure_df.is_empty():
+            return None
+
+        def on_changed(threshold: float, degrees: dict) -> None:
+            # The eye button must show the table that is on screen, not the
+            # one from the threshold the network was built at.
+            self._degree_at_threshold[layer] = (threshold, dict(degrees))
+            self._update_view_data_button()
+
+        return build_threshold_slider(
+            measure_df=measure_df,
+            measure=self._last_config.measure if self._last_config else "",
+            initial=result.independent_threshold,
+            figure=figure,
+            canvas=canvas,
+            bins=self._mln_config.degree_bins,
+            title=f"Degree Histogram — {result.layer_column} = {layer}",
+            on_changed=on_changed,
+            on_error=lambda msg: self._append_log(f"MLN: Degree — {layer}: {msg}"),
+        )
+
+    def _populate_evo_centrality(self, result: MLNEvolutionResult) -> None:
+        """Point the Evo: Centrality sub-tabs at the per-layer metric paths."""
+        metrics = result.layer_metrics
+        if metrics.is_empty() or "layer" not in metrics.columns:
+            # Distinguish "you did not ask for it" from "it was asked for and
+            # produced nothing" -- the first is the common case and the user
+            # needs to be told which box to tick.
+            if not self._evolution_config.run_centrality:
+                self.tab_evo_centrality.set_placeholder(
+                    "Not computed: tick “Run Centrality” in Evolution "
+                    "Settings, then build again."
+                )
+            else:
+                self.tab_evo_centrality.set_placeholder(
+                    "The evolution pass produced no per-layer centrality data."
+                )
+            return
+        layers = [
+            layer
+            for layer in self._mln_layer_order()
+            if layer in set(metrics.get_column("layer").to_list())
+        ]
+        if not layers:
+            layers = sorted(set(metrics.get_column("layer").to_list()))
+        centrality = self._mln_config.centrality
+        top_n = self._mln_config.centrality_top_n
+
+        def render(layer: str) -> Figure | None:
+            frame = metrics_for_layer(metrics, layer)
+            if frame.is_empty():
+                return None
+            return render_centrality_trajectories(
+                frame, centrality_metric=centrality, n_nodes=top_n
+            )
+
+        self.tab_evo_centrality.set_layers(layers, render)
+
+    def _mln_layer_order(self) -> list[str]:
+        """Layer values in the multiplex's own order, when a result exists."""
+        if self._mln_result is None:
+            return []
+        return list(self._mln_result.layer_values)
 
     # ------------------------------------------------------------- MLN signals
     def _on_mln_progress(self, done: int, total: int, desc: str) -> None:
@@ -2396,6 +2605,7 @@ class MainWindow(QMainWindow):
         self._render_mln_view()
         self._show_mln_metrics(result.metrics_fig)
         self._show_mln_community(result.community_fig)
+        self._populate_mln_degree(result)
         self.lbl_status.setText("MLN ready.")
         self._append_log("MLN rendered.")
         self._cleanup_mln_worker()

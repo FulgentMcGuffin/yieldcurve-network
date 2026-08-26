@@ -5,6 +5,7 @@ from __future__ import annotations
 from PySide6.QtCore import Qt
 from PySide6.QtGui import QColor, QPalette
 from PySide6.QtWidgets import (
+    QCheckBox,
     QComboBox,
     QDialog,
     QDialogButtonBox,
@@ -44,7 +45,15 @@ class EvolutionSettingsDialog(QDialog):
         initial_config: EvolutionConfig | None = None,
         independent_threshold: float = 0.33,
         max_nodes: int | None = None,
+        evolution_enabled: bool = True,
     ) -> None:
+        """
+        Args:
+            evolution_enabled: Whether the sidebar's "Run Evolution" is ticked.
+                "Run Centrality" is meaningless without it -- the window loop
+                it hooks into never runs -- so it is disabled and forced off
+                when this is False.
+        """
         super().__init__(parent)
         self.setWindowTitle("Evolution Analysis Settings")
         self.setModal(True)
@@ -56,6 +65,7 @@ class EvolutionSettingsDialog(QDialog):
             independent_threshold=independent_threshold
         )
         self.max_nodes = max_nodes or 20
+        self.evolution_enabled = evolution_enabled
 
         self._build_form()
 
@@ -133,6 +143,23 @@ class EvolutionSettingsDialog(QDialog):
         )
         self._update_community_spin_state()
 
+        # Per-layer centrality trajectories ("Evo: Centrality").
+        self.chk_run_centrality = QCheckBox("Run Centrality")
+        self.chk_run_centrality.setChecked(
+            self.initial_config.run_centrality and self.evolution_enabled
+        )
+        self.chk_run_centrality.setEnabled(self.evolution_enabled)
+        self.chk_run_centrality.setToolTip(
+            "Also track each component network's per-node centrality across "
+            "the windows, filling the 'Evo: Centrality' tab. Adds one "
+            "centrality solve per layer per window; nothing else in the "
+            "evolution pass needs it, so it is off by default."
+            if self.evolution_enabled
+            else "Tick “Run Evolution” in the sidebar first — this rides on "
+            "that pass's window loop."
+        )
+        form.addRow("Centrality trajectories:", self.chk_run_centrality)
+
         # Independent threshold (read-only, informational)
         lbl_threshold = QLabel(f"{self.initial_config.independent_threshold:.2f}")
         form.addRow("Edge threshold:", lbl_threshold)
@@ -181,4 +208,7 @@ class EvolutionSettingsDialog(QDialog):
                 self.cmb_community_method.currentData()
                 or self.cmb_community_method.currentText()
             ),
+            measure=self.initial_config.measure,
+            edge_settings=self.initial_config.edge_settings,
+            run_centrality=self.chk_run_centrality.isChecked(),
         )
