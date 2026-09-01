@@ -13,38 +13,64 @@ TEXT_LOG = "#7dd3fc"
 ACCENT = "#2563eb"
 ACCENT_HOVER = "#1d4ed8"
 
-APP_STYLE = f"""
+
+def build_app_style(
+    *,
+    bg_app: str = BG_APP,
+    bg_sidebar: str = BG_SIDEBAR,
+    bg_control: str = BG_CONTROL,
+    bg_control_hover: str = BG_CONTROL_HOVER,
+    border: str = BORDER,
+    border_muted: str = BORDER_MUTED,
+    text: str = TEXT,
+    text_muted: str = TEXT_MUTED,
+    text_log: str = TEXT_LOG,
+    accent: str = ACCENT,
+    accent_hover: str = ACCENT_HOVER,
+) -> str:
+    """The full stylesheet, parameterized by its eleven colour roles.
+
+    ``APP_STYLE`` below is this called with the defaults -- the startup
+    theme. GUI theme switching (``main_window._apply_theme``) calls this
+    again with a different colour set instead of maintaining a second,
+    shorter stylesheet: an independently hand-rolled theme stylesheet drifts
+    out of sync with this one over time, silently losing rules (button/
+    progress-bar corner radii, the collapsible sections' transparent
+    background) that then fall back to Qt's plain default look the moment a
+    theme is applied. One template, always fully applied, cannot drift.
+    """
+    return f"""
 QWidget {{
     font-family: "Segoe UI", "Helvetica Neue", sans-serif;
     font-size: 12px;
-    color: {TEXT};
-    background-color: {BG_APP};
+    color: {text};
+    background-color: {bg_app};
 }}
 QMainWindow, QWidget#Root {{
-    background-color: {BG_APP};
-    color: {TEXT};
+    background-color: {bg_app};
+    color: {text};
 }}
 
 /* Sidebar containers only — avoid universal descendant border:none. */
 QFrame#Sidebar {{
-    background-color: {BG_SIDEBAR};
-    color: {TEXT};
+    background-color: {bg_sidebar};
+    color: {text};
     border: none;
     border-right: 1px solid #2a2f3a;
 }}
 QFrame#Sidebar QScrollArea {{
-    background-color: {BG_SIDEBAR};
+    background-color: {bg_sidebar};
     border: none;
 }}
 QWidget#SidebarContent {{
-    background-color: {BG_SIDEBAR};
-    color: {TEXT};
+    background-color: {bg_sidebar};
+    color: {text};
     border: none;
 }}
 
 QLabel {{
     background-color: transparent;
-    color: {TEXT};
+    color: {text};
 }}
 QLabel#Brand {{
     color: #ffffff;
@@ -54,7 +80,7 @@ QLabel#Brand {{
     padding-bottom: 2px;
 }}
 QLabel#SectionTitle {{
-    color: {TEXT_MUTED};
+    color: {text_muted};
     font-size: 10px;
     font-weight: 600;
     letter-spacing: 0.8px;
@@ -62,7 +88,7 @@ QLabel#SectionTitle {{
     padding-bottom: 0px;
 }}
 QToolButton#CollapseHeader {{
-    color: {TEXT_MUTED};
+    color: {text_muted};
     font-size: 10px;
     font-weight: 600;
     letter-spacing: 0.8px;
@@ -72,18 +98,18 @@ QToolButton#CollapseHeader {{
     text-align: left;
 }}
 QToolButton#CollapseHeader:hover {{
-    color: {TEXT};
+    color: {text};
 }}
 QWidget#CollapseBody {{
     background-color: transparent;
     border: none;
 }}
 QLabel#DbPath, QLabel#StatusLabel {{
-    color: {TEXT_MUTED};
+    color: {text_muted};
     font-size: 11px;
 }}
 QLabel#LogTitle {{
-    color: {TEXT_MUTED};
+    color: {text_muted};
     font-size: 10px;
     font-weight: 600;
     letter-spacing: 0.8px;
@@ -92,48 +118,48 @@ QLabel#LogTitle {{
 
 QCheckBox {{
     background-color: transparent;
-    color: {TEXT};
+    color: {text};
     spacing: 6px;
 }}
 QCheckBox::indicator {{
     width: 14px;
     height: 14px;
     border-radius: 3px;
-    border: 1px solid {BORDER};
-    background-color: {BG_CONTROL};
+    border: 1px solid {border};
+    background-color: {bg_control};
 }}
 QCheckBox::indicator:checked {{
-    background-color: {ACCENT};
-    border-color: {BORDER};
+    background-color: {accent};
+    border-color: {border};
 }}
 
 QRadioButton {{
     background-color: transparent;
-    color: {TEXT};
+    color: {text};
     spacing: 6px;
 }}
 QRadioButton::indicator {{
     width: 14px;
     height: 14px;
     border-radius: 7px;
-    border: 1px solid {BORDER};
-    background-color: {BG_CONTROL};
+    border: 1px solid {border};
+    background-color: {bg_control};
 }}
 QRadioButton::indicator:checked {{
-    background-color: {ACCENT};
-    border-color: {BORDER};
+    background-color: {accent};
+    border-color: {border};
 }}
 QRadioButton:disabled {{
-    color: {TEXT_MUTED};
+    color: {text_muted};
 }}
 
 QComboBox, QLineEdit, QDateEdit, QDoubleSpinBox, QListWidget {{
-    background-color: {BG_CONTROL};
+    background-color: {bg_control};
     color: #ffffff;
-    border: 1px solid {BORDER};
+    border: 1px solid {border};
     border-radius: 6px;
     padding: 4px 7px;
-    selection-background-color: {ACCENT};
+    selection-background-color: {accent};
     min-height: 22px;
 }}
 QDateEdit, QDoubleSpinBox {{
@@ -142,7 +168,7 @@ QDateEdit, QDoubleSpinBox {{
 QComboBox:hover, QLineEdit:hover, QDateEdit:hover, QListWidget:hover,
 QDoubleSpinBox:hover {{
     border-color: #bae6fd;
-    background-color: {BG_CONTROL_HOVER};
+    background-color: {bg_control_hover};
 }}
 QComboBox:focus, QLineEdit:focus, QDateEdit:focus, QDoubleSpinBox:focus,
 QListWidget:focus {{
@@ -163,16 +189,16 @@ QComboBox::down-arrow {{
     image: none;
     border-left: 4px solid transparent;
     border-right: 4px solid transparent;
-    border-top: 5px solid {BORDER};
+    border-top: 5px solid {border};
     width: 0;
     height: 0;
     margin-right: 6px;
 }}
 QComboBox QAbstractItemView {{
-    background-color: {BG_CONTROL};
+    background-color: {bg_control};
     color: #ffffff;
-    border: 1px solid {BORDER};
-    selection-background-color: {ACCENT};
+    border: 1px solid {border};
+    selection-background-color: {accent};
     outline: none;
 }}
 QDateEdit::up-button, QDoubleSpinBox::up-button {{
@@ -182,7 +208,7 @@ QDateEdit::up-button, QDoubleSpinBox::up-button {{
     border: none;
     border-left: 1px solid #475569;
     border-bottom: 1px solid #475569;
-    background-color: {BG_CONTROL_HOVER};
+    background-color: {bg_control_hover};
     border-top-right-radius: 5px;
 }}
 QDateEdit::down-button, QDoubleSpinBox::down-button {{
@@ -192,7 +218,7 @@ QDateEdit::down-button, QDoubleSpinBox::down-button {{
     border: none;
     border-left: 1px solid #475569;
     border-top: 1px solid #475569;
-    background-color: {BG_CONTROL_HOVER};
+    background-color: {bg_control_hover};
     border-bottom-right-radius: 5px;
 }}
 QDateEdit::up-button:hover, QDoubleSpinBox::up-button:hover,
@@ -205,7 +231,7 @@ QDateEdit::up-arrow, QDoubleSpinBox::up-arrow {{
     height: 0;
     border-left: 4px solid transparent;
     border-right: 4px solid transparent;
-    border-bottom: 5px solid {BORDER};
+    border-bottom: 5px solid {border};
 }}
 QDateEdit::down-arrow, QDoubleSpinBox::down-arrow {{
     image: none;
@@ -213,7 +239,7 @@ QDateEdit::down-arrow, QDoubleSpinBox::down-arrow {{
     height: 0;
     border-left: 4px solid transparent;
     border-right: 4px solid transparent;
-    border-top: 5px solid {BORDER};
+    border-top: 5px solid {border};
 }}
 
 QListWidget {{
@@ -226,51 +252,51 @@ QListWidget::item {{
     color: #ffffff;
 }}
 QListWidget::item:selected {{
-    background-color: {ACCENT};
+    background-color: {accent};
 }}
 
 QPushButton {{
-    background-color: {ACCENT};
+    background-color: {accent};
     color: #ffffff;
-    border: 1px solid {BORDER_MUTED};
+    border: 1px solid {border_muted};
     border-radius: 16px;
     padding: 7px 14px;
     font-weight: 600;
 }}
 QPushButton:hover {{
-    background-color: {ACCENT_HOVER};
-    border-color: {BORDER};
+    background-color: {accent_hover};
+    border-color: {border};
 }}
 QPushButton:pressed {{
     background-color: #1e40af;
 }}
 QPushButton:disabled {{
     background-color: #334155;
-    color: {TEXT_MUTED};
+    color: {text_muted};
     border-color: #475569;
 }}
 QPushButton#SecondaryButton {{
-    background-color: {BG_CONTROL};
-    color: {TEXT_MUTED};
-    border: 1px solid {BORDER};
+    background-color: {bg_control};
+    color: {text_muted};
+    border: 1px solid {border};
     border-radius: 8px;
     padding: 5px 10px;
 }}
 QPushButton#SecondaryButton:hover {{
-    background-color: {BG_CONTROL_HOVER};
-    color: {TEXT};
+    background-color: {bg_control_hover};
+    color: {text};
     border-color: #bae6fd;
 }}
 QToolButton#ViewDataButton {{
-    background-color: {BG_CONTROL};
-    color: {TEXT};
-    border: 1px solid {BORDER};
+    background-color: {bg_control};
+    color: {text};
+    border: 1px solid {border};
     border-radius: 4px;
     padding: 0;
     margin: 2px 6px 0 0;
 }}
 QToolButton#ViewDataButton:hover {{
-    background-color: {BG_CONTROL_HOVER};
+    background-color: {bg_control_hover};
     border-color: #bae6fd;
 }}
 QToolButton#ViewDataButton:disabled {{
@@ -278,24 +304,24 @@ QToolButton#ViewDataButton:disabled {{
     border-color: #475569;
 }}
 QTableView {{
-    background-color: {BG_CONTROL};
+    background-color: {bg_control};
     color: #ffffff;
-    border: 1px solid {BORDER};
+    border: 1px solid {border};
     border-radius: 6px;
     gridline-color: #334155;
-    selection-background-color: {ACCENT};
+    selection-background-color: {accent};
     selection-color: #ffffff;
     alternate-background-color: #243044;
 }}
 QHeaderView::section {{
-    background-color: {BG_SIDEBAR};
-    color: {TEXT};
+    background-color: {bg_sidebar};
+    color: {text};
     border: 1px solid #334155;
     padding: 4px 18px 4px 6px;
     font-weight: 600;
 }}
 QTableView::item:selected {{
-    background-color: {ACCENT};
+    background-color: {accent};
     color: #ffffff;
 }}
 QPushButton#CancelButton {{
@@ -317,41 +343,41 @@ QPushButton#CancelButton:disabled {{
 }}
 
 QProgressBar {{
-    background-color: {BG_CONTROL};
-    border: 1px solid {BORDER};
+    background-color: {bg_control};
+    border: 1px solid {border};
     border-radius: 6px;
     text-align: center;
-    color: {TEXT};
+    color: {text};
     height: 14px;
 }}
 QProgressBar::chunk {{
-    background-color: {ACCENT};
+    background-color: {accent};
     border-radius: 5px;
 }}
 
 QFrame#CanvasFrame {{
-    background-color: {BG_APP};
+    background-color: {bg_app};
     border: none;
 }}
 QFrame#Canvas {{
-    background-color: {BG_APP};
+    background-color: {bg_app};
     border: 1px solid #2a2f3a;
     border-radius: 10px;
 }}
 QTabWidget#ResultTabs {{
-    background-color: {BG_APP};
+    background-color: {bg_app};
     border: none;
 }}
 QTabWidget#ResultTabs::pane {{
-    background-color: {BG_APP};
+    background-color: {bg_app};
     border: 1px solid #2a2f3a;
     border-radius: 8px;
     top: 0px;
     border-top: none;
 }}
 QTabWidget#ResultTabs QTabBar::tab {{
-    background-color: {BG_SIDEBAR};
-    color: {TEXT_MUTED};
+    background-color: {bg_sidebar};
+    color: {text_muted};
     border: 1px solid #2a2f3a;
     border-bottom: none;
     border-top-left-radius: 8px;
@@ -361,20 +387,20 @@ QTabWidget#ResultTabs QTabBar::tab {{
 }}
 QTabWidget#ResultTabs QTabBar::tab:selected {{
     background-color: #24292e;
-    color: {TEXT_LOG};
-    border-color: {BORDER};
+    color: {text_log};
+    border-color: {border};
 }}
 QTabWidget#ResultTabs QTabBar::tab:hover {{
     color: #ffffff;
 }}
 QLabel#HistLabel {{
     background-color: transparent;
-    color: {TEXT_MUTED};
+    color: {text_muted};
 }}
 QPlainTextEdit#ProcessLog {{
-    background-color: {BG_SIDEBAR};
-    color: {TEXT_LOG};
-    border: 1px solid {BORDER};
+    background-color: {bg_sidebar};
+    color: {text_log};
+    border: 1px solid {border};
     border-radius: 8px;
     font-family: Consolas, "Courier New", monospace;
     font-size: 11px;
@@ -382,7 +408,7 @@ QPlainTextEdit#ProcessLog {{
 }}
 
 QScrollBar:vertical {{
-    background: {BG_SIDEBAR};
+    background: {bg_sidebar};
     width: 10px;
     margin: 0;
 }}
@@ -395,7 +421,7 @@ QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
     height: 0;
 }}
 QScrollBar:horizontal {{
-    background: {BG_SIDEBAR};
+    background: {bg_sidebar};
     height: 10px;
 }}
 QScrollBar::handle:horizontal {{
@@ -407,16 +433,19 @@ QSplitter::handle {{
     width: 1px;
 }}
 QCalendarWidget QWidget {{
-    background-color: {BG_CONTROL};
+    background-color: {bg_control};
     color: #ffffff;
 }}
 QCalendarWidget QToolButton {{
     color: #ffffff;
-    background-color: {BG_CONTROL};
+    background-color: {bg_control};
 }}
 QCalendarWidget QAbstractItemView:enabled {{
     color: #ffffff;
-    background-color: {BG_CONTROL};
-    selection-background-color: {ACCENT};
+    background-color: {bg_control};
+    selection-background-color: {accent};
 }}
 """
+
+
+APP_STYLE = build_app_style()

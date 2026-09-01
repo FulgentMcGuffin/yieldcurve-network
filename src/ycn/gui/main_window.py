@@ -122,7 +122,7 @@ from ycn.gui.session_io import (
     settings_summary,
 )
 from ycn.gui.stress_trajectory_tab import StressTrajectoryTab
-from ycn.gui.styles import APP_STYLE, BG_SIDEBAR
+from ycn.gui.styles import APP_STYLE, BG_SIDEBAR, build_app_style
 from ycn.gui.user_filter_dialog import UserFilterDialog
 from ycn.gui.workers import (
     MLNEvolutionResult,
@@ -1562,56 +1562,58 @@ class MainWindow(QMainWindow):
         theme = GuiSettingsDialog.get_theme(theme_name)
         if theme is None:
             return
-        # Update global stylesheet with theme colors
-        theme_css = self._generate_theme_css(theme)
-        self.setStyleSheet(theme_css)
+        self.setStyleSheet(self._generate_theme_css(theme))
 
     @staticmethod
-    def _generate_theme_css(theme) -> str:
-        """Generate CSS stylesheet from theme definition."""
-        # Base style from APP_STYLE with theme color overrides
-        base_css = """
-        QWidget { color: #ffffff; }
-        QMainWindow, QDialog, QFrame { background-color: %(bg_primary)s; }
-        QLabel { color: %(text_primary)s; }
-        QPushButton, QToolButton { background-color: %(accent)s; color: #ffffff;
-                                    border: 1px solid %(border)s; border-radius: 4px;
-                                    padding: 6px 12px; }
-        QPushButton:pressed { background-color: %(input_bg)s; }
-        QPushButton:hover { background-color: %(accent)s; opacity: 0.8; }
-        QPushButton:disabled { background-color: %(input_bg)s; color: %(text_secondary)s; }
-        QCheckBox { color: %(text_primary)s; }
-        QComboBox { background-color: %(input_bg)s; color: %(text_primary)s;
-                   border: 1px solid %(border)s; border-radius: 3px; }
-        QSpinBox, QDoubleSpinBox { background-color: %(input_bg)s; color: %(text_primary)s;
-                                   border: 1px solid %(border)s; border-radius: 3px; }
-        QLineEdit, QPlainTextEdit { background-color: %(input_bg)s; color: %(text_primary)s;
-                                   border: 1px solid %(border)s; border-radius: 3px; }
-        QTabWidget::pane { border: 1px solid %(border)s; }
-        QTabBar::tab { background-color: %(bg_sidebar)s; color: %(text_primary)s;
-                       padding: 6px 16px; border: 1px solid %(border)s; }
-        QTabBar::tab:selected { background-color: %(accent)s; color: #ffffff; }
-        QTableWidget { background-color: %(input_bg)s; color: %(text_primary)s;
-                      gridline-color: %(border)s; }
-        QTableWidget::item { padding: 4px; }
-        QHeaderView::section { background-color: %(bg_sidebar)s; color: %(text_primary)s;
-                              padding: 4px; border: 1px solid %(border)s; }
-        QScrollBar:vertical { background-color: %(bg_sidebar)s; width: 12px; }
-        QScrollBar::handle:vertical { background-color: %(accent)s; border-radius: 6px; }
-        #StatusLabel { color: %(text_secondary)s; }
-        #SidebarFrame { background-color: %(bg_sidebar)s; }
-        #SecondaryButton { background-color: %(accent)s; color: #ffffff; }
-        #SecondaryButton:hover { background-color: %(border)s; }
+    def _shade(hex_color: str, factor: float) -> str:
+        """Lighten (``factor`` > 0) or darken (``factor`` < 0) a ``#rrggbb`` colour.
+
+        Used to derive the hover/muted shades a `Theme` does not specify of
+        its own (it only names 7 roles; the shared stylesheet needs 11) --
+        interpolates each channel toward white (lighten) or toward black
+        (darken) by ``factor``, e.g. ``-0.15`` matches roughly how far the
+        startup theme's own ``ACCENT`` -> ``ACCENT_HOVER`` step darkens.
         """
-        return base_css % {
-            "bg_primary": theme.bg_primary,
-            "bg_sidebar": theme.bg_sidebar,
-            "text_primary": theme.text_primary,
-            "text_secondary": theme.text_secondary,
-            "accent": theme.accent,
-            "border": theme.border,
-            "input_bg": theme.input_bg,
-        }
+        hex_color = hex_color.lstrip("#")
+        r, g, b = (int(hex_color[i : i + 2], 16) for i in (0, 2, 4))
+        if factor >= 0:
+            r += (255 - r) * factor
+            g += (255 - g) * factor
+            b += (255 - b) * factor
+        else:
+            r *= 1 + factor
+            g *= 1 + factor
+            b *= 1 + factor
+        return f"#{int(round(r)):02x}{int(round(g)):02x}{int(round(b)):02x}"
+
+    @classmethod
+    def _generate_theme_css(cls, theme) -> str:
+        """The full app stylesheet for ``theme``.
+
+        Calls the same ``build_app_style`` template the startup ("Sky Blue")
+        theme itself is built from, rather than a separately maintained,
+        shorter stylesheet -- the previous approach silently dropped rules
+        (button/progress-bar corner radii, the collapsible sections'
+        transparent background) that the startup theme has and a switched-to
+        theme then didn't, falling back to Qt's plain default look. A
+        `Theme` only names 7 colour roles; the remaining 4 (hover/muted
+        shades) are derived from it via `_shade`.
+        """
+        return build_app_style(
+            bg_app=theme.bg_primary,
+            bg_sidebar=theme.bg_sidebar,
+            bg_control=theme.input_bg,
+            bg_control_hover=cls._shade(theme.input_bg, 0.15),
+            border=theme.border,
+            border_muted=cls._shade(theme.border, -0.15),
+            text=theme.text_primary,
+            text_muted=theme.text_secondary,
+            # Matches the startup theme, where TEXT_LOG and BORDER are the
+            # same colour (both a sky-blue accent for the process log).
+            text_log=theme.border,
+            accent=theme.accent,
+            accent_hover=cls._shade(theme.accent, -0.15),
+        )
 
     # -------------------------------------------------------------------- run
     def _selected_transforms(self) -> list[str]:
