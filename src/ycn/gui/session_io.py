@@ -34,6 +34,36 @@ RESIDUAL = "residual"
 EVOLUTION = "evolution"
 NEURAL_EVOLUTION = "neural_evolution"
 
+ISSUER_COLUMN = "__issuer__"
+
+
+def _flatten_by_issuer(frames: dict[str, pl.DataFrame]) -> pl.DataFrame:
+    """Concatenate a per-issuer dict of frames into one long frame.
+
+    Mirrors ``layer_metrics_frame``'s long-form-with-an-id-column convention
+    rather than minting one archive frame per issuer, so the archive's frame
+    count does not grow with the panel's issuer count. Empty when ``frames``
+    is empty (an old archive, or a run whose per-issuer stage failed).
+    """
+    parts = [
+        frame.with_columns(pl.lit(issuer).alias(ISSUER_COLUMN))
+        for issuer, frame in frames.items()
+        if not frame.is_empty()
+    ]
+    if not parts:
+        return pl.DataFrame()
+    return pl.concat(parts, how="vertical_relaxed")
+
+
+def _unflatten_by_issuer(long: pl.DataFrame) -> dict[str, pl.DataFrame]:
+    """Invert :func:`_flatten_by_issuer`."""
+    if long.is_empty() or ISSUER_COLUMN not in long.columns:
+        return {}
+    return {
+        str(key[0]): frame.drop(ISSUER_COLUMN)
+        for key, frame in long.partition_by(ISSUER_COLUMN, as_dict=True).items()
+    }
+
 
 # ------------------------------------------------------------------- capture
 def capture_mln(session: Session, result: MLNResult) -> None:
@@ -77,7 +107,7 @@ def capture_residual(session: Session, result: ResidualResult) -> None:
 
 def capture_evolution(session: Session, result: MLNEvolutionResult) -> None:
     """Store an :class:`MLNEvolutionResult` into ``session``."""
-    session.scalars[EVOLUTION] = {}
+    session.scalars[EVOLUTION] = {"skipped_issuers": list(result.skipped_issuers)}
     session.frames.update(
         {
             f"{EVOLUTION}.edge_types": result.edge_types,
@@ -87,18 +117,30 @@ def capture_evolution(session: Session, result: MLNEvolutionResult) -> None:
             f"{EVOLUTION}.factors": result.factors,
             f"{EVOLUTION}.regimes": result.regimes,
             f"{EVOLUTION}.stress": result.stress,
+            f"{EVOLUTION}.issuer_factors": _flatten_by_issuer(result.issuer_factors),
+            f"{EVOLUTION}.issuer_regimes": _flatten_by_issuer(result.issuer_regimes),
+            f"{EVOLUTION}.issuer_stress": _flatten_by_issuer(result.issuer_stress),
         }
     )
 
 
 def capture_neural_evolution(session: Session, result: NeuralEvolutionResult) -> None:
     """Store a :class:`NeuralEvolutionResult` into ``session``."""
-    session.scalars[NEURAL_EVOLUTION] = {}
+    session.scalars[NEURAL_EVOLUTION] = {"skipped_issuers": list(result.skipped_issuers)}
     session.frames.update(
         {
             f"{NEURAL_EVOLUTION}.factors": result.factors,
             f"{NEURAL_EVOLUTION}.regimes": result.regimes,
             f"{NEURAL_EVOLUTION}.stress": result.stress,
+            f"{NEURAL_EVOLUTION}.issuer_factors": _flatten_by_issuer(
+                result.issuer_factors
+            ),
+            f"{NEURAL_EVOLUTION}.issuer_regimes": _flatten_by_issuer(
+                result.issuer_regimes
+            ),
+            f"{NEURAL_EVOLUTION}.issuer_stress": _flatten_by_issuer(
+                result.issuer_stress
+            ),
         }
     )
 
@@ -204,6 +246,7 @@ def restore_evolution(session: Session) -> MLNEvolutionResult | None:
     factors = session.frame(f"{EVOLUTION}.factors")
     regimes = session.frame(f"{EVOLUTION}.regimes")
     stress = session.frame(f"{EVOLUTION}.stress")
+    scalars = session.scalars.get(EVOLUTION, {})
 
     return MLNEvolutionResult(
         edge_types=edge_types,
@@ -219,6 +262,13 @@ def restore_evolution(session: Session) -> MLNEvolutionResult | None:
         factor_fig=render_factor_evolution(factors, regimes, std=False),
         factor_std_fig=render_factor_evolution(factors, regimes, std=True),
         stress_fig=render_stress_quadrants(stress),
+        # Absent from archives written before the per-issuer picker existed;
+        # _unflatten_by_issuer returns {} for a missing/empty frame, which
+        # simply leaves the issuer picker showing "Average" only.
+        issuer_factors=_unflatten_by_issuer(session.frame(f"{EVOLUTION}.issuer_factors")),
+        issuer_regimes=_unflatten_by_issuer(session.frame(f"{EVOLUTION}.issuer_regimes")),
+        issuer_stress=_unflatten_by_issuer(session.frame(f"{EVOLUTION}.issuer_stress")),
+        skipped_issuers=list(scalars.get("skipped_issuers", [])),
     )
 
 
@@ -229,6 +279,7 @@ def restore_neural_evolution(session: Session) -> NeuralEvolutionResult | None:
     factors = session.frame(f"{NEURAL_EVOLUTION}.factors")
     regimes = session.frame(f"{NEURAL_EVOLUTION}.regimes")
     stress = session.frame(f"{NEURAL_EVOLUTION}.stress")
+    scalars = session.scalars.get(NEURAL_EVOLUTION, {})
 
     return NeuralEvolutionResult(
         factors=factors,
@@ -237,6 +288,16 @@ def restore_neural_evolution(session: Session) -> NeuralEvolutionResult | None:
         factor_fig=render_factor_evolution(factors, regimes, std=False),
         factor_std_fig=render_factor_evolution(factors, regimes, std=True),
         stress_fig=render_stress_quadrants(stress),
+        issuer_factors=_unflatten_by_issuer(
+            session.frame(f"{NEURAL_EVOLUTION}.issuer_factors")
+        ),
+        issuer_regimes=_unflatten_by_issuer(
+            session.frame(f"{NEURAL_EVOLUTION}.issuer_regimes")
+        ),
+        issuer_stress=_unflatten_by_issuer(
+            session.frame(f"{NEURAL_EVOLUTION}.issuer_stress")
+        ),
+        skipped_issuers=list(scalars.get("skipped_issuers", [])),
     )
 
 

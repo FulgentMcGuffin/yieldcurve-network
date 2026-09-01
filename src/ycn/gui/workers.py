@@ -44,8 +44,10 @@ from ycn.analysis.mln_viz import (
 )
 from ycn.analysis.mln_evolution import (
     compute_curve_factors,
+    compute_curve_factors_by_issuer,
     compute_multiplex_evolution,
     compute_stress_metrics,
+    compute_stress_metrics_by_issuer,
 )
 from ycn.analysis.mln_evolution_viz import (
     render_edge_evolution,
@@ -545,6 +547,15 @@ class MLNEvolutionResult:
     factor_fig: Figure
     factor_std_fig: Figure
     stress_fig: Figure
+    # Per-issuer analogues of factors/regimes/stress, keyed by issuer -- feed
+    # the "Evo: Resids"/"Evo: Cov"/"Evo: Cov(t)" issuer picker. Rendered on
+    # demand in MainWindow, not here: pre-rendering a figure per issuer up
+    # front would pay for every issuer even though a run usually only looks
+    # at a few.
+    issuer_factors: dict[str, pl.DataFrame] = field(default_factory=dict)
+    issuer_regimes: dict[str, pl.DataFrame] = field(default_factory=dict)
+    issuer_stress: dict[str, pl.DataFrame] = field(default_factory=dict)
+    skipped_issuers: list[str] = field(default_factory=list)
 
 
 @dataclass
@@ -565,6 +576,10 @@ class NeuralEvolutionResult:
     factor_fig: Figure
     factor_std_fig: Figure
     stress_fig: Figure
+    issuer_factors: dict[str, pl.DataFrame] = field(default_factory=dict)
+    issuer_regimes: dict[str, pl.DataFrame] = field(default_factory=dict)
+    issuer_stress: dict[str, pl.DataFrame] = field(default_factory=dict)
+    skipped_issuers: list[str] = field(default_factory=list)
 
 
 class ResidualWorker(_ThrottledProgressMixin, QObject):
@@ -699,7 +714,14 @@ class MLNEvolutionWorker(_ThrottledProgressMixin, QObject):
             # Factors and stress are curve-level, not multiplex-level, so a
             # failure in either must not discard the multiplex evolution that
             # already succeeded -- the Links tab still has something to show.
+            # Same reasoning splits each of those two into a market half and a
+            # per-issuer half: a per-issuer failure must not lose the market
+            # result the "Average" selection needs.
             factors = regimes = stress = pl.DataFrame()
+            issuer_factors: dict[str, pl.DataFrame] = {}
+            issuer_regimes: dict[str, pl.DataFrame] = {}
+            issuer_stress: dict[str, pl.DataFrame] = {}
+            skipped_issuers: list[str] = []
             try:
                 factors, regimes = compute_curve_factors(
                     long,
@@ -715,8 +737,32 @@ class MLNEvolutionWorker(_ThrottledProgressMixin, QObject):
                 self._status_wrapper(f"Evolution: factor evolution skipped ({exc})")
 
             try:
+                self._status_wrapper("Evolution: computing per-issuer factor evolution...")
+                issuer_factors, issuer_regimes, skipped_issuers = (
+                    compute_curve_factors_by_issuer(
+                        long,
+                        panel,
+                        cfg.date_column,
+                        window_size=self._evolution_config.window_size,
+                        step_size=self._evolution_config.step,
+                        progress=self._progress_wrapper,
+                        status=self._status_wrapper,
+                    )
+                )
+                if skipped_issuers:
+                    names = ", ".join(skipped_issuers[:6])
+                    self._status_wrapper(
+                        f"Evolution: {len(skipped_issuers)} issuer(s) skipped for "
+                        f"per-issuer factors ({names})"
+                    )
+            except WorkerCancelled:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                self._status_wrapper(f"Evolution: per-issuer factor evolution skipped ({exc})")
+
+            try:
                 self._status_wrapper("Evolution: computing correlation stress...")
-                _issuers, dates, cube, _terms, _skipped = residual_cube(
+                issuers, dates, cube, _terms, _skipped = residual_cube(
                     long,
                     panel,
                     cfg.date_column,
@@ -728,6 +774,17 @@ class MLNEvolutionWorker(_ThrottledProgressMixin, QObject):
                     dates,
                     window_size=self._evolution_config.window_size,
                     step_size=self._evolution_config.step,
+                )
+
+                self._status_wrapper("Evolution: computing per-issuer correlation stress...")
+                issuer_stress = compute_stress_metrics_by_issuer(
+                    issuers,
+                    dates,
+                    cube,
+                    window_size=self._evolution_config.window_size,
+                    step_size=self._evolution_config.step,
+                    progress=self._progress_wrapper,
+                    status=self._status_wrapper,
                 )
             except WorkerCancelled:
                 raise
@@ -750,6 +807,10 @@ class MLNEvolutionWorker(_ThrottledProgressMixin, QObject):
                 factor_fig=render_factor_evolution(factors, regimes, std=False),
                 factor_std_fig=render_factor_evolution(factors, regimes, std=True),
                 stress_fig=render_stress_quadrants(stress),
+                issuer_factors=issuer_factors,
+                issuer_regimes=issuer_regimes,
+                issuer_stress=issuer_stress,
+                skipped_issuers=skipped_issuers,
             )
             self._status_wrapper("Evolution: complete.")
             self.progress.emit(1, 1, "done")
@@ -811,8 +872,14 @@ class NeuralEvolutionWorker(_ThrottledProgressMixin, QObject):
             model = ModelSpec(ResidualModel.NEURAL_HJM, seed=self._seed)
 
             # As in MLNEvolutionWorker: factors and stress are independent, so
-            # a failure in either must not discard the other.
+            # a failure in either must not discard the other -- and each
+            # splits into a market half and a per-issuer half for the same
+            # reason.
             factors = regimes = stress = pl.DataFrame()
+            issuer_factors: dict[str, pl.DataFrame] = {}
+            issuer_regimes: dict[str, pl.DataFrame] = {}
+            issuer_stress: dict[str, pl.DataFrame] = {}
+            skipped_issuers: list[str] = []
             try:
                 factors, regimes = compute_curve_factors(
                     long,
@@ -830,8 +897,34 @@ class NeuralEvolutionWorker(_ThrottledProgressMixin, QObject):
                 self._status_wrapper(f"Neural: factor evolution skipped ({exc})")
 
             try:
+                self._status_wrapper("Neural: computing per-issuer factor evolution...")
+                issuer_factors, issuer_regimes, skipped_issuers = (
+                    compute_curve_factors_by_issuer(
+                        long,
+                        panel,
+                        cfg.date_column,
+                        model=model,
+                        window_size=self._evolution_config.window_size,
+                        step_size=self._evolution_config.step,
+                        progress=self._progress_wrapper,
+                        status=self._status_wrapper,
+                        log_prefix="Neural",
+                    )
+                )
+                if skipped_issuers:
+                    names = ", ".join(skipped_issuers[:6])
+                    self._status_wrapper(
+                        f"Neural: {len(skipped_issuers)} issuer(s) skipped for "
+                        f"per-issuer factors ({names})"
+                    )
+            except WorkerCancelled:
+                raise
+            except Exception as exc:  # noqa: BLE001
+                self._status_wrapper(f"Neural: per-issuer factor evolution skipped ({exc})")
+
+            try:
                 self._status_wrapper("Neural: computing correlation stress...")
-                _issuers, dates, cube, _terms, _skipped = residual_cube(
+                issuers, dates, cube, _terms, _skipped = residual_cube(
                     long,
                     panel,
                     cfg.date_column,
@@ -845,6 +938,18 @@ class NeuralEvolutionWorker(_ThrottledProgressMixin, QObject):
                     dates,
                     window_size=self._evolution_config.window_size,
                     step_size=self._evolution_config.step,
+                )
+
+                self._status_wrapper("Neural: computing per-issuer correlation stress...")
+                issuer_stress = compute_stress_metrics_by_issuer(
+                    issuers,
+                    dates,
+                    cube,
+                    window_size=self._evolution_config.window_size,
+                    step_size=self._evolution_config.step,
+                    progress=self._progress_wrapper,
+                    status=self._status_wrapper,
+                    log_prefix="Neural",
                 )
             except WorkerCancelled:
                 raise
@@ -862,6 +967,10 @@ class NeuralEvolutionWorker(_ThrottledProgressMixin, QObject):
                 factor_fig=render_factor_evolution(factors, regimes, std=False),
                 factor_std_fig=render_factor_evolution(factors, regimes, std=True),
                 stress_fig=render_stress_quadrants(stress),
+                issuer_factors=issuer_factors,
+                issuer_regimes=issuer_regimes,
+                issuer_stress=issuer_stress,
+                skipped_issuers=skipped_issuers,
             )
             self._status_wrapper("Neural: complete.")
             self.progress.emit(1, 1, "done")

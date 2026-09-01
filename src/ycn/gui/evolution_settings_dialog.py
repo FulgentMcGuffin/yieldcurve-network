@@ -175,9 +175,12 @@ class EvolutionSettingsDialog(QDialog):
             self.chk_run_neural_hjm.setToolTip(
                 "Also fit the experimental Neural HJM model (needs the neural "
                 "extra) and compute its factor/stress evolution alongside the "
-                "Nelson-Siegel one. Only runs when Run Evolution is also ticked; "
-                "adds a fourth, sequential analysis stage — this is the slowest of "
-                "them, since it trains one small neural net per issuer."
+                "Nelson-Siegel one, for the market average and every issuer on "
+                "its own. Only runs when Run Evolution is also ticked; adds a "
+                "fourth, sequential analysis stage — this is the slowest of "
+                "them, since it trains one small neural net per issuer twice "
+                "over (once for the residual/stress cube, once more for the "
+                "issuer's own factor trajectory)."
             )
         else:
             self.chk_run_neural_hjm.setToolTip(

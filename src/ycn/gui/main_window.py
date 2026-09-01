@@ -69,6 +69,7 @@ from ycn.analysis.measures import (
 )
 from ycn.analysis.degree_hist import render_degree_histogram
 from ycn.analysis.evolution_viz import render_centrality_trajectories
+from ycn.analysis.mln_evolution_viz import render_factor_evolution, render_stress_quadrants
 from ycn.analysis.mln import MLNConfig
 from ycn.analysis.mln_layer_metrics import layer_subgraph, metrics_for_layer
 from ycn.analysis.session import (
@@ -242,6 +243,12 @@ class MainWindow(QMainWindow):
         # via the same _syncing-guard idiom used by the other synced combos.
         self._resid_source_pickers: list[QComboBox] = []
         self._syncing_resid_source: bool = False
+        # Second, unlabelled picker on the same three tabs: "Average" (the
+        # market-average result, existing behaviour) or a specific issuer's
+        # own factor/stress evolution. Same sync idiom, populated once an
+        # evolution result actually has per-issuer data.
+        self._issuer_pickers: list[QComboBox] = []
+        self._syncing_issuer_source: bool = False
         # True while a saved session is being applied, so signal handlers that
         # would recompute or invalidate the restored state can stand down.
         self._loading_settings = False
@@ -499,8 +506,10 @@ class MainWindow(QMainWindow):
         self.chk_evolution.setToolTip(
             "Rebuild the multiplex inside every rolling window and track its "
             "edge composition, community count, curve factors and correlation "
-            "stress. Much slower than the single multiplex — the four "
-            "'Evo:' tabs stay empty until this is ticked."
+            "stress — for the market average and, additionally, for every "
+            "issuer on its own (feeds the issuer picker on 'Evo: Resids'/"
+            "'Evo: Cov'/'Evo: Cov(t)'). Much slower than the single multiplex "
+            "— the four 'Evo:' tabs stay empty until this is ticked."
         )
         evolution_body.addWidget(self.chk_evolution)
         self.btn_evolution_settings = QPushButton("⚙ Evolution Settings")
@@ -680,7 +689,13 @@ class MainWindow(QMainWindow):
         self.tabs.addTab(self._wrap_with_source_picker(cov_page), "Evo: Cov")
 
         self.tab_cov_t = StressTrajectoryTab()
-        self.tab_cov_t.add_toolbar_widget(self._make_source_picker())
+        cov_t_pickers = QWidget()
+        cov_t_pickers_row = QHBoxLayout(cov_t_pickers)
+        cov_t_pickers_row.setContentsMargins(0, 0, 0, 0)
+        cov_t_pickers_row.setSpacing(6)
+        cov_t_pickers_row.addWidget(self._make_source_picker())
+        cov_t_pickers_row.addWidget(self._make_issuer_picker())
+        self.tab_cov_t.add_toolbar_widget(cov_t_pickers)
         self.tabs.addTab(self.tab_cov_t, "Evo: Cov(t)")
 
         self._clear_evolution_tabs()
@@ -760,6 +775,29 @@ class MainWindow(QMainWindow):
         self._resid_source_pickers.append(combo)
         return combo
 
+    def _make_issuer_picker(self) -> QComboBox:
+        """A second, unlabelled combo choosing "Average" vs. one issuer.
+
+        Sits to the right of the model-source picker on the same three tabs,
+        no label of its own -- the model picker's "Show:" label already reads
+        naturally across both. Starts with only "Average"; per-issuer items
+        are added by :meth:`_populate_issuer_picker` once an evolution result
+        actually has per-issuer data. Stays in sync across all three tabs via
+        the same guard idiom as the model-source picker.
+        """
+        combo = QComboBox()
+        combo.addItem("Average", "average")
+        combo.setToolTip(
+            "Choose the market-average result (existing behaviour) or a "
+            "single issuer's own factor/stress evolution. Per-issuer entries "
+            "appear once 'Run Evolution' has computed them."
+        )
+        combo.currentIndexChanged.connect(
+            lambda _i, c=combo: self._on_issuer_source_changed(c)
+        )
+        self._issuer_pickers.append(combo)
+        return combo
+
     def _wrap_with_source_picker(self, content: QWidget) -> QWidget:
         """Stack a source-picker row above an existing tab page."""
         page = QFrame()
@@ -775,6 +813,7 @@ class MainWindow(QMainWindow):
         label.setStyleSheet("color: #94a3b8;")
         row.addWidget(label)
         row.addWidget(self._make_source_picker())
+        row.addWidget(self._make_issuer_picker())
         row.addStretch(1)
         outer.addLayout(row)
         outer.addWidget(content, stretch=1)
@@ -797,10 +836,32 @@ class MainWindow(QMainWindow):
             self._syncing_resid_source = False
         self._render_resid_source()
 
+    def _on_issuer_source_changed(self, changed: QComboBox) -> None:
+        if self._syncing_issuer_source:
+            return
+        issuer = changed.currentData()
+        self._syncing_issuer_source = True
+        try:
+            for combo in self._issuer_pickers:
+                if combo is not changed:
+                    index = combo.findData(issuer)
+                    if index >= 0:
+                        combo.blockSignals(True)
+                        combo.setCurrentIndex(index)
+                        combo.blockSignals(False)
+        finally:
+            self._syncing_issuer_source = False
+        self._render_resid_source()
+
     def _active_resid_source(self) -> str:
         if not self._resid_source_pickers:
             return "ns"
         return self._resid_source_pickers[0].currentData()
+
+    def _active_issuer_source(self) -> str:
+        if not self._issuer_pickers:
+            return "average"
+        return self._issuer_pickers[0].currentData() or "average"
 
     def _set_neural_source_available(self, available: bool) -> None:
         """Enable/disable "Neural-HJM resids" on every picker, and fall back."""
@@ -813,8 +874,38 @@ class MainWindow(QMainWindow):
                 combo.blockSignals(False)
         self._render_resid_source()
 
+    def _populate_issuer_picker(self) -> None:
+        """(Re)build the issuer entries from whichever evolution result(s) exist.
+
+        Takes the union across both the NS and Neural-HJM results so an
+        issuer that succeeded under one model but not the other still shows
+        up -- switching the model picker to it then falls back to "no data"
+        via the same empty-frame handling ``render_factor_evolution``/
+        ``render_stress_quadrants`` already do, rather than the issuer
+        vanishing from the list. Keeps the current selection if it is still
+        present, otherwise falls back to "Average".
+        """
+        issuers: set[str] = set()
+        for result in (self._evolution_result, self._neural_evolution_result):
+            if result is not None:
+                issuers.update(result.issuer_factors)
+                issuers.update(result.issuer_stress)
+        ordered = sorted(issuers)
+
+        current = self._active_issuer_source()
+        for combo in self._issuer_pickers:
+            combo.blockSignals(True)
+            combo.clear()
+            combo.addItem("Average", "average")
+            for issuer in ordered:
+                combo.addItem(issuer, issuer)
+            index = combo.findData(current)
+            combo.setCurrentIndex(index if index >= 0 else 0)
+            combo.blockSignals(False)
+        self._render_resid_source()
+
     def _render_resid_source(self) -> None:
-        """Draw whichever evolution result the picker currently selects."""
+        """Draw whichever evolution result + issuer selection the pickers choose."""
         source = self._active_resid_source()
         result = (
             self._neural_evolution_result
@@ -823,14 +914,35 @@ class MainWindow(QMainWindow):
         )
         if result is None:
             return
-        self._show_figure(self.evo_factor_layout, result.factor_fig)
-        self._show_figure(self.evo_factor_std_layout, result.factor_std_fig)
-        self._show_figure(self.evo_cov_layout, result.stress_fig)
+
+        issuer = self._active_issuer_source()
+        if issuer == "average":
+            factors, regimes, stress = result.factors, result.regimes, result.stress
+            factor_fig = result.factor_fig
+            factor_std_fig = result.factor_std_fig
+            stress_fig = result.stress_fig
+        else:
+            # Rendered on demand rather than pre-rendered on the worker
+            # thread: a run usually only looks at a handful of issuers, so
+            # eagerly drawing a figure per issuer per model would pay for
+            # every issuer regardless. Both renderers already turn an empty
+            # frame (issuer missing under this model, or its fit failed) into
+            # a themed placeholder, not an error.
+            factors = result.issuer_factors.get(issuer, pl.DataFrame())
+            regimes = result.issuer_regimes.get(issuer, pl.DataFrame())
+            stress = result.issuer_stress.get(issuer, pl.DataFrame())
+            factor_fig = render_factor_evolution(factors, regimes, std=False)
+            factor_std_fig = render_factor_evolution(factors, regimes, std=True)
+            stress_fig = render_stress_quadrants(stress)
+
+        self._show_figure(self.evo_factor_layout, factor_fig)
+        self._show_figure(self.evo_factor_std_layout, factor_std_fig)
+        self._show_figure(self.evo_cov_layout, stress_fig)
         # The two 3D sub-tabs read the same frames as the static ones, so the
         # picker moves all four together.
-        self.tab_factor_t.set_result(result.factors, result.regimes)
-        self.tab_factor_std_t.set_result(result.factors, result.regimes)
-        self.tab_cov_t.set_result(result.stress)
+        self.tab_factor_t.set_result(factors, regimes)
+        self.tab_factor_std_t.set_result(factors, regimes)
+        self.tab_cov_t.set_result(stress)
         self._update_view_data_button()
 
     @staticmethod
@@ -953,14 +1065,22 @@ class MainWindow(QMainWindow):
             result = neural if source == "neural" else evolution
             if result is None:
                 return None
-            label = "Neural-HJM resids" if source == "neural" else "NS Resids"
+            model_label = "Neural-HJM resids" if source == "neural" else "NS Resids"
+            issuer = self._active_issuer_source()
+            if issuer == "average":
+                factors, regimes, stress = result.factors, result.regimes, result.stress
+            else:
+                factors = result.issuer_factors.get(issuer, pl.DataFrame())
+                regimes = result.issuer_regimes.get(issuer, pl.DataFrame())
+                stress = result.issuer_stress.get(issuer, pl.DataFrame())
+            label = f"{model_label} — {issuer if issuer != 'average' else 'Average'}"
             if title == "Evo: Resids":
-                frame = self._factors_frame(result)
+                frame = self._factors_frame(factors, regimes)
                 sub = self.tabs_evo_resids.tabText(self.tabs_evo_resids.currentIndex())
                 return f"{title} — {label} — {sub}", frame
-            if result.stress.is_empty():
+            if stress.is_empty():
                 return None
-            return f"{title} — {label}", result.stress
+            return f"{title} — {label}", stress
         return None
 
     @staticmethod
@@ -980,19 +1100,18 @@ class MainWindow(QMainWindow):
         return edges.join(wide.rename(renamed), on="window_idx", how="left")
 
     @staticmethod
-    def _factors_frame(
-        result: MLNEvolutionResult | NeuralEvolutionResult,
-    ) -> pl.DataFrame:
+    def _factors_frame(factors: pl.DataFrame, regimes: pl.DataFrame) -> pl.DataFrame:
         """Factor means and volatilities per window, with the regime label.
 
-        Duck-typed over either result -- both expose ``.factors``/``.regimes``
-        with identical shapes, so one helper serves whichever model is active.
+        Takes the frames directly rather than a result object: the caller may
+        be reading the market ``.factors``/``.regimes`` or a per-issuer pair
+        out of ``.issuer_factors``/``.issuer_regimes``, and this does not need
+        to know which.
         """
-        factors = result.factors
-        if factors.is_empty() or result.regimes.is_empty():
+        if factors.is_empty() or regimes.is_empty():
             return factors
         return factors.join(
-            result.regimes.select(["window_idx", "regime"]),
+            regimes.select(["window_idx", "regime"]),
             on="window_idx",
             how="left",
         )
@@ -2210,11 +2329,13 @@ class MainWindow(QMainWindow):
         self._evolution_result = result
         self._show_figure(self.evo_links_layout, result.links_fig)
         self._populate_evo_centrality(result)
-        self._render_resid_source()
+        self._populate_issuer_picker()
         self._append_log(
             f"Evolution rendered: {result.edge_types.height} window(s), "
             f"{result.factors.height} factor window(s), "
-            f"{result.stress.height} stress window(s)."
+            f"{result.stress.height} stress window(s), "
+            f"{len(result.issuer_factors)} issuer(s) with per-issuer factors, "
+            f"{len(result.issuer_stress)} issuer(s) with per-issuer stress."
         )
         self._evolution_worker = None
         self._evolution_worker_thread = None
@@ -2262,9 +2383,12 @@ class MainWindow(QMainWindow):
             return
         self._neural_evolution_result = result
         self._set_neural_source_available(True)
+        self._populate_issuer_picker()
         self._append_log(
             f"Neural-HJM evolution rendered: {result.factors.height} factor "
-            f"window(s), {result.stress.height} stress window(s)."
+            f"window(s), {result.stress.height} stress window(s), "
+            f"{len(result.issuer_factors)} issuer(s) with per-issuer factors, "
+            f"{len(result.issuer_stress)} issuer(s) with per-issuer stress."
         )
         self._neural_evolution_worker = None
         self._neural_evolution_worker_thread = None
@@ -2317,6 +2441,7 @@ class MainWindow(QMainWindow):
         self._evolution_result = None
         self._neural_evolution_result = None
         self._set_neural_source_available(False)
+        self._populate_issuer_picker()
         self._update_view_data_button()
 
     def _set_evolution_building(self) -> None:

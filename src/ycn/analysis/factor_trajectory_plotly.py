@@ -92,6 +92,7 @@ def build_factor_trajectory_figure(
     *,
     std: bool = False,
     title: str | None = None,
+    animate: bool = False,
 ) -> go.Figure:
     """3D path through level/slope/curvature space, in window order.
 
@@ -102,6 +103,12 @@ def build_factor_trajectory_figure(
             folded into each point's hover text when present.
         std: Plot the within-window volatilities instead of the means.
         title: Overrides the default title.
+        animate: Add a native Plotly play/pause button and slider that scrubs
+            the highlight trace along the path. ``False`` by default so the
+            GUI's own usage (:mod:`ycn.gui.factor_trajectory_tab`, which drives
+            the same highlight trace from a Qt slider via injected JS) is
+            unaffected -- a plain standalone figure (e.g. for a notebook) has
+            no Qt/JS host to drive it, so this is the substitute.
 
     Returns:
         A figure whose last trace is the single-point highlight the scrubber
@@ -220,7 +227,94 @@ def build_factor_trajectory_figure(
     )
 
     _apply_layout(fig, heading, std=std, empty=False)
+    if animate:
+        _add_scrubber_animation(fig, xs, ys, zs, custom)
     return fig
+
+
+def _add_scrubber_animation(
+    fig: go.Figure,
+    xs: list[float],
+    ys: list[float],
+    zs: list[float],
+    custom: list[list[str]],
+) -> None:
+    """Native play/pause + slider that scrubs the highlight trace.
+
+    Does with Plotly's own ``frames``/``sliders``/``updatemenus`` what the
+    GUI's Qt slider does by calling ``Plotly.restyle`` from injected JS (see
+    ``factor_trajectory_tab.py``) -- move the single highlighted point along
+    the path one window at a time. Needs no Qt/JS host, so it renders and
+    scrubs standalone in a notebook or any plain Plotly viewer.
+
+    The highlight trace is always the last one :func:`build_factor_trajectory_
+    figure` adds (:data:`HIGHLIGHT_TRACE_NAME`); each frame patches only that
+    trace's position and hover data; the marker styling set when it was first
+    added persists across frames unless a frame overrides it.
+    """
+    highlight_idx = len(fig.data) - 1
+
+    fig.frames = [
+        go.Frame(
+            name=str(i),
+            data=[go.Scatter3d(x=[xs[i]], y=[ys[i]], z=[zs[i]], customdata=[custom[i]])],
+            traces=[highlight_idx],
+        )
+        for i in range(len(xs))
+    ]
+
+    animate_args = dict(frame=dict(duration=250, redraw=True), mode="immediate")
+    fig.update_layout(
+        updatemenus=[
+            dict(
+                type="buttons",
+                showactive=False,
+                x=0.02,
+                y=0.02,
+                xanchor="left",
+                yanchor="bottom",
+                bgcolor=CANVAS_BG,
+                font=dict(color=TEXT_MUTED, size=10),
+                buttons=[
+                    dict(
+                        label="▶ Play",
+                        method="animate",
+                        args=[None, dict(**animate_args, fromcurrent=True)],
+                    ),
+                    dict(
+                        label="⏸ Pause",
+                        method="animate",
+                        args=[
+                            [None],
+                            dict(frame=dict(duration=0, redraw=False), mode="immediate"),
+                        ],
+                    ),
+                ],
+            )
+        ],
+        sliders=[
+            dict(
+                active=0,
+                x=0.12,
+                y=0.02,
+                len=0.82,
+                currentvalue=dict(
+                    prefix="Window ", font=dict(color=TEXT_MUTED, size=11)
+                ),
+                font=dict(color=TEXT_MUTED, size=9),
+                bgcolor=GRID_COLOR,
+                bordercolor=CANVAS_BG,
+                steps=[
+                    dict(
+                        label=str(i),
+                        method="animate",
+                        args=[[str(i)], dict(**animate_args)],
+                    )
+                    for i in range(len(xs))
+                ],
+            )
+        ],
+    )
 
 
 NO_REGIME = "—"

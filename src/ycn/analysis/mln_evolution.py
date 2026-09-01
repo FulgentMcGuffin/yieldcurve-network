@@ -19,7 +19,7 @@ Pure polars/numpy/networkx, safe to run on a worker thread.
 
 from __future__ import annotations
 
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import date, datetime
 from itertools import count
@@ -281,85 +281,71 @@ def compute_multiplex_evolution(
     )
 
 
-def compute_curve_factors(
-    long: pl.DataFrame,
-    panel: CurvePanel,
+def _fit_curve_factors(
+    wide: pl.DataFrame,
     date_column: str,
+    maturities: list[str],
     *,
-    model: ModelSpec | None = None,
-    window_size: int = 30,
-    step_size: int = 10,
-    n_regimes: int = 3,
-    status: StatusCallback | None = None,
-    log_prefix: str = "Evolution",
+    model: ModelSpec | None,
+    window_size: int,
+    step_size: int,
+    n_regimes: int,
+    status: StatusCallback | None,
+    log_prefix: str,
+    subject: str,
 ) -> tuple[pl.DataFrame, pl.DataFrame]:
-    """Factor trajectories of the market-average curve.
+    """Fit + rolling-window + regime pipeline shared by the market and
+    per-issuer factor-trajectory entry points.
 
-    The curve is averaged across issuers first, so this describes the market
-    rather than any single issuer -- matching the notebook's ``ns_market``.
-    ``model=None`` -- the default -- fits plain Nelson-Siegel independently
-    per date, unchanged from before this function took a ``model`` argument.
-    A :class:`ModelSpec` instead fits that model **jointly across the whole
-    series** (``af_models.fit_panel`` treats the market-average curve as a
-    single-issuer panel), which is what lets a model with a genuinely
-    time-varying correction -- Neural HJM -- produce a factor trajectory that
-    differs from the Nelson-Siegel one, rather than a fixed relabelling of it.
+    ``wide`` holds one curve (dates as rows, maturities as columns) -- the
+    market-average curve for :func:`compute_curve_factors`, or a single
+    issuer's own curve for :func:`compute_curve_factors_by_issuer`. This
+    function does not know or care which; ``subject`` only names whose curve
+    is being fit in status lines (``"market-average"`` or an issuer code).
 
-    ``log_prefix`` tags every status line this function emits (default
-    ``"Evolution"``, matching the NS evolution worker); pass ``"Neural"`` when
-    called from the Neural-HJM worker so the process log stays as clearly
-    attributed as it already is for the rest of that stage. A model-based fit
-    also reports a checkpoint every 25 training epochs -- otherwise the market
-    curve's fit, unlike the fast per-date NS path, gives no sign of life until
-    it finishes.
+    ``model=None`` fits plain Nelson-Siegel independently per date. A
+    :class:`ModelSpec` instead fits that model **jointly across the whole
+    series** (``af_models.fit_panel`` treats ``wide`` as a single-issuer
+    panel), which is what lets a model with a genuinely time-varying
+    correction -- Neural HJM -- produce a factor trajectory that differs from
+    the Nelson-Siegel one, rather than a fixed relabelling of it.
     """
-    market = (
-        long.group_by([date_column, panel.term_column])
-        .agg(pl.col(panel.rate_column).mean().alias(panel.rate_column))
-        .sort(date_column)
-    )
-    wide = pivot_to_wide(
-        market,
-        date_column=date_column,
-        name_column=panel.term_column,
-        value_column=panel.rate_column,
-    )
-    maturities = [c for c in wide.columns if c != date_column]
     if len(maturities) < 4:
         raise ValueError(
-            f"Nelson-Siegel needs at least 4 maturities; got {len(maturities)}."
+            f"Nelson-Siegel needs at least 4 maturities for {subject}; "
+            f"got {len(maturities)}."
         )
 
     if model is None:
         if status is not None:
-            status(f"{log_prefix}: fitting market-average Nelson-Siegel factors…")
-        ns_market = fit_nelson_siegel_batch(
+            status(f"{log_prefix}: fitting {subject} Nelson-Siegel factors…")
+        ns_fit = fit_nelson_siegel_batch(
             wide, date_col=date_column, maturities=maturities, decay=1.0
         )
-        if ns_market.is_empty():
+        if ns_fit.is_empty():
             raise ValueError(
-                "Nelson-Siegel could not be fitted on any date. Every date "
-                "needs a complete market-average curve across the selected "
+                f"Nelson-Siegel could not be fitted on any date for {subject}. "
+                "Every date needs a complete curve across the selected "
                 "maturities."
             )
-        market_factors = ns_market.select([date_column, "level", "slope", "curvature"])
+        curve_factors = ns_fit.select([date_column, "level", "slope", "curvature"])
     else:
         if status is not None:
-            status(f"{log_prefix}: fitting market-average {model.model.label} factors…")
+            status(f"{log_prefix}: fitting {subject} {model.model.label} factors…")
         canonical = _canonical_maturities(maturities)
         canon_wide = wide.rename(canonical)
         terms = [canonical[m] for m in maturities]
         dates, yields = _dense_rows(canon_wide, date_column, terms)
         if not dates:
             raise ValueError(
-                "No date has a complete market-average curve across the "
-                "selected maturities."
+                f"No date has a complete curve across the selected maturities "
+                f"for {subject}."
             )
         checkpoints = count(1)
         on_chunk = (
             (
                 lambda: status(
-                    f"{log_prefix}: market-average {model.model.label} fit "
+                    f"{log_prefix}: {subject} {model.model.label} fit "
                     f"in progress (checkpoint {next(checkpoints)})…"
                 )
             )
@@ -369,7 +355,7 @@ def compute_curve_factors(
         fit = fit_panel(
             _canonical_maturity_values(terms), yields, model, on_chunk=on_chunk
         )
-        market_factors = pl.DataFrame(
+        curve_factors = pl.DataFrame(
             {
                 date_column: dates,
                 "level": fit.factors[:, 0],
@@ -380,15 +366,15 @@ def compute_curve_factors(
 
     # compute_factor_trajectories selects a column literally named "date".
     if date_column != "date":
-        market_factors = market_factors.rename({date_column: "date"})
+        curve_factors = curve_factors.rename({date_column: "date"})
 
     stats = compute_factor_trajectories(
-        market_factors, window_size=window_size, step_size=step_size
+        curve_factors, window_size=window_size, step_size=step_size
     )
     if not stats.get("windows"):
         raise ValueError(
-            "No factor windows produced; widen the date range or reduce the "
-            "evolution window size."
+            f"No factor windows produced for {subject}; widen the date range "
+            "or reduce the evolution window size."
         )
 
     factors = pl.DataFrame(
@@ -424,35 +410,189 @@ def compute_curve_factors(
         )
     except Exception as exc:  # noqa: BLE001 -- regimes are decorative, not required
         if status is not None:
-            status(f"Evolution: regime classification skipped ({exc})")
+            status(f"{log_prefix}: {subject} regime classification skipped ({exc})")
 
     return factors, regimes
 
 
-def compute_stress_metrics(
-    cube: np.ndarray,
-    dates: list,
+def compute_curve_factors(
+    long: pl.DataFrame,
+    panel: CurvePanel,
+    date_column: str,
     *,
+    model: ModelSpec | None = None,
     window_size: int = 30,
     step_size: int = 10,
-) -> pl.DataFrame:
-    """Rolling stability of the residual correlation structure.
+    n_regimes: int = 3,
+    status: StatusCallback | None = None,
+    log_prefix: str = "Evolution",
+) -> tuple[pl.DataFrame, pl.DataFrame]:
+    """Factor trajectories of the market-average curve.
 
-    Uses the mid-maturity slice of the residual cube, as the notebook does: a
-    single representative tenor keeps the indicator one-dimensional and
-    comparable across windows.
+    The curve is averaged across issuers first, so this describes the market
+    rather than any single issuer -- matching the notebook's ``ns_market``.
+    See :func:`compute_curve_factors_by_issuer` for the per-issuer analogue,
+    which fits each issuer's own curve instead of averaging them away.
+
+    ``log_prefix`` tags every status line this function emits (default
+    ``"Evolution"``, matching the NS evolution worker); pass ``"Neural"`` when
+    called from the Neural-HJM worker so the process log stays as clearly
+    attributed as it already is for the rest of that stage. A model-based fit
+    also reports a checkpoint every 25 training epochs -- otherwise the market
+    curve's fit, unlike the fast per-date NS path, gives no sign of life until
+    it finishes.
     """
-    n_sources, n_dates, n_terms = cube.shape
-    term_idx = n_terms // 2
+    market = (
+        long.group_by([date_column, panel.term_column])
+        .agg(pl.col(panel.rate_column).mean().alias(panel.rate_column))
+        .sort(date_column)
+    )
+    wide = pivot_to_wide(
+        market,
+        date_column=date_column,
+        name_column=panel.term_column,
+        value_column=panel.rate_column,
+    )
+    maturities = [c for c in wide.columns if c != date_column]
+    return _fit_curve_factors(
+        wide,
+        date_column,
+        maturities,
+        model=model,
+        window_size=window_size,
+        step_size=step_size,
+        n_regimes=n_regimes,
+        status=status,
+        log_prefix=log_prefix,
+        subject="market-average",
+    )
+
+
+def compute_curve_factors_by_issuer(
+    long: pl.DataFrame,
+    panel: CurvePanel,
+    date_column: str,
+    *,
+    model: ModelSpec | None = None,
+    window_size: int = 30,
+    step_size: int = 10,
+    n_regimes: int = 3,
+    issuers: Sequence[str] | None = None,
+    progress: ProgressCallback | None = None,
+    status: StatusCallback | None = None,
+    log_prefix: str = "Evolution",
+) -> tuple[dict[str, pl.DataFrame], dict[str, pl.DataFrame], list[str]]:
+    """Per-issuer analogue of :func:`compute_curve_factors`.
+
+    ``compute_curve_factors`` averages every issuer into one market curve
+    before fitting -- it describes the market, not any single issuer. This
+    instead fits **each issuer's own curve** in turn, through the exact same
+    fit -> rolling-window -> regime pipeline, so a caller gets one
+    ``(factors, regimes)`` pair per issuer instead of one pair for the
+    averaged market. Both shapes are the same ``(window_idx, date_end,
+    level_mean, level_std, slope_mean, slope_std, curvature_mean,
+    curvature_std)`` schema :func:`compute_curve_factors` returns, so every
+    existing consumer of that shape -- the GUI's
+    :func:`ycn.analysis.mln_evolution_viz.render_factor_evolution` and the 3D
+    :func:`ycn.analysis.factor_trajectory_plotly.build_factor_trajectory_figure`
+    -- reads a per-issuer result exactly like it reads the market one.
+
+    Args:
+        long: Long ``(date, issuer, term, rate)`` panel.
+        panel: Column-role assignment for ``long``.
+        date_column: Observation date column.
+        model: ``None`` fits plain per-date Nelson-Siegel (matching
+            ``compute_curve_factors``'s default); a :class:`ModelSpec` fits
+            that model jointly across each issuer's own series instead.
+        window_size, step_size: Passed to ``compute_factor_trajectories``.
+        n_regimes: Passed to ``classify_yield_curve_regimes``.
+        issuers: Restrict to these issuers (default: every issuer in
+            ``long``, in order of first appearance).
+        progress: ``(done, total, message)`` once per issuer.
+        status: Free-text status line -- one per issuer, plus periodic
+            model-fit checkpoints on the model path -- mirroring
+            ``residual_networks.residual_cube``'s per-issuer logging.
+        log_prefix: Tags every status line (pass ``"Neural"`` from the
+            Neural-HJM worker), matching ``compute_curve_factors``.
+
+    Returns:
+        ``(factors_by_issuer, regimes_by_issuer, skipped)``. An issuer lands
+        in ``skipped`` -- rather than aborting the whole run, the way the
+        single-curve market path raises -- when it has too few complete
+        dates to produce even one rolling window, or its curve cannot be
+        fitted at all.
+    """
+    issuer_col = panel.issuer_column
+    all_issuers = (
+        list(issuers)
+        if issuers is not None
+        else long.get_column(issuer_col).unique(maintain_order=True).to_list()
+    )
+    total = len(all_issuers)
+
+    factors_by_issuer: dict[str, pl.DataFrame] = {}
+    regimes_by_issuer: dict[str, pl.DataFrame] = {}
+    skipped: list[str] = []
+
+    for i, issuer in enumerate(all_issuers, start=1):
+        one = long.filter(pl.col(issuer_col) == issuer)
+        wide = pivot_to_wide(
+            one,
+            date_column=date_column,
+            name_column=panel.term_column,
+            value_column=panel.rate_column,
+        )
+        maturities = [c for c in wide.columns if c != date_column]
+        try:
+            factors, regimes = _fit_curve_factors(
+                wide,
+                date_column,
+                maturities,
+                model=model,
+                window_size=window_size,
+                step_size=step_size,
+                n_regimes=n_regimes,
+                status=status,
+                log_prefix=log_prefix,
+                subject=str(issuer),
+            )
+            factors_by_issuer[issuer] = factors
+            regimes_by_issuer[issuer] = regimes
+        except Exception as exc:  # noqa: BLE001 -- one bad issuer must not sink the rest
+            skipped.append(issuer)
+            if status is not None:
+                status(f"{log_prefix}: {issuer} skipped ({exc})")
+        if progress is not None:
+            progress(i, total, f"per-issuer factors: {issuer} ({i}/{total})")
+
+    return factors_by_issuer, regimes_by_issuer, skipped
+
+
+def _stress_from_series(
+    series_by_source: np.ndarray,
+    dates: list,
+    *,
+    window_size: int,
+    step_size: int,
+) -> pl.DataFrame:
+    """Rolling correlation-stability stress indicator, shared core.
+
+    ``series_by_source[s, d]`` is one value per (source, date). ``compute_
+    stress_metrics`` feeds this issuers-at-a-representative-term (the market
+    view); ``compute_stress_metrics_by_issuer`` feeds it one issuer's own
+    terms (the per-issuer view). Neither the windowing nor the 0-100 scaling
+    below cares which axis "source" is.
+    """
+    n_dates = series_by_source.shape[1]
     rows: list[dict] = []
 
     for w_start in range(0, n_dates - window_size + 1, step_size):
         w_end = w_start + window_size
-        series = cube[:, w_start:w_end, term_idx]
-        series = series[:, ~np.isnan(series).any(axis=0)]
-        if series.shape[1] <= 1:
+        window = series_by_source[:, w_start:w_end]
+        window = window[:, ~np.isnan(window).any(axis=0)]
+        if window.shape[0] <= 1 or window.shape[1] <= 1:
             continue
-        corr = np.corrcoef(series)
+        corr = np.corrcoef(window)
         upper = np.abs(corr[np.triu_indices_from(corr, k=1)])
         upper = upper[np.isfinite(upper)]
         if upper.size == 0:
@@ -485,3 +625,114 @@ def compute_stress_metrics(
         .otherwise(pl.lit("Calm"))
         .alias("stress_band")
     )
+
+
+def compute_stress_metrics(
+    cube: np.ndarray,
+    dates: list,
+    *,
+    window_size: int = 30,
+    step_size: int = 10,
+) -> pl.DataFrame:
+    """Rolling stability of the residual correlation structure.
+
+    Uses the mid-maturity slice of the residual cube, as the notebook does: a
+    single representative tenor keeps the indicator one-dimensional and
+    comparable across windows. Correlates **across issuers** at that tenor --
+    the market view. See :func:`compute_stress_metrics_by_issuer` for the
+    per-issuer analogue, which instead correlates one issuer's own tenors.
+    """
+    _n_sources, _n_dates, n_terms = cube.shape
+    term_idx = n_terms // 2
+    return _stress_from_series(
+        cube[:, :, term_idx], dates, window_size=window_size, step_size=step_size
+    )
+
+
+def compute_stress_metrics_by_issuer(
+    issuers: list[str],
+    dates: list,
+    cube: np.ndarray,
+    *,
+    window_size: int = 30,
+    step_size: int = 10,
+    target_issuers: Sequence[str] | None = None,
+    progress: ProgressCallback | None = None,
+    status: StatusCallback | None = None,
+    log_prefix: str = "Evolution",
+) -> dict[str, pl.DataFrame]:
+    """Per-issuer analogue of :func:`compute_stress_metrics`.
+
+    ``compute_stress_metrics`` treats the cube's issuer axis as the
+    correlation "sources" at one representative tenor -- how correlated
+    issuers are *with each other*. This instead holds one issuer fixed and
+    correlates **across that issuer's own tenors** at each window -- how
+    internally coherent that issuer's own curve is -- mirroring
+    ``residual_networks``'s ``ISSUER_BY_TERM`` vs ``TERM_BY_ISSUER`` split,
+    applied to the rolling stress indicator instead of a single static
+    network. Unlike the market path it needs no representative-tenor pick:
+    every tenor the issuer has is used directly as a source.
+
+    Reuses the cube :func:`compute_stress_metrics`'s caller already built for
+    the market indicator -- no re-fitting, purely numpy over an existing
+    array -- so this is cheap relative to the per-issuer *factor* trajectory
+    computation (:func:`compute_curve_factors_by_issuer`), which does refit.
+
+    Args:
+        issuers: The cube's issuer axis, in order (``residual_cube``'s
+            ``kept`` return value).
+        dates: The cube's date axis (``residual_cube``'s ``all_dates``).
+        cube: ``(n_issuers, n_dates, n_terms)``, NaN where an issuer/date/term
+            has no residual.
+        window_size, step_size: Passed to the shared windowing core.
+        target_issuers: Restrict to these issuers (default: all of
+            ``issuers``).
+        progress: ``(done, total, message)`` once per issuer.
+        status: Free-text status line for an issuer with too few usable
+            tenors to correlate (dropped, not raised -- one bad issuer must
+            not lose the rest).
+        log_prefix: Tags status lines (pass ``"Neural"`` from the Neural-HJM
+            worker), matching the rest of this module's per-issuer functions.
+
+    Returns:
+        ``{issuer: stress}``, same schema as :func:`compute_stress_metrics`.
+        An issuer with fewer than two usable tenors is silently absent.
+    """
+    index_of = {issuer: i for i, issuer in enumerate(issuers)}
+    wanted = list(target_issuers) if target_issuers is not None else list(issuers)
+    total = len(wanted)
+
+    out: dict[str, pl.DataFrame] = {}
+    for i, issuer in enumerate(wanted, start=1):
+        idx = index_of.get(issuer)
+        if idx is not None:
+            series = cube[idx, :, :].T  # (n_terms, n_dates)
+            # Curve panels are ragged (residual_networks.residual_cube's own
+            # docstring): a tenor this issuer never quotes is NaN at every
+            # date, not just occasionally. Left in, that one all-NaN row
+            # would poison every window's date-completeness check below and
+            # zero out the whole result -- drop structurally-absent tenors
+            # first, exactly as residual_networks.build_residual_network
+            # drops a node with no data at all before requiring complete
+            # dates among what is left.
+            present = ~np.isnan(series).all(axis=1)
+            series = series[present]
+            if series.shape[0] < 2:
+                if status is not None:
+                    status(f"{log_prefix}: {issuer} stress skipped (fewer than 2 tenors)")
+                if progress is not None:
+                    progress(i, total, f"per-issuer stress: {issuer} ({i}/{total})")
+                continue
+            stress = _stress_from_series(
+                series, dates, window_size=window_size, step_size=step_size
+            )
+            if not stress.is_empty():
+                out[issuer] = stress
+            elif status is not None:
+                status(f"{log_prefix}: {issuer} stress skipped (too few usable dates)")
+        elif status is not None:
+            status(f"{log_prefix}: {issuer} not in residual cube, stress skipped")
+        if progress is not None:
+            progress(i, total, f"per-issuer stress: {issuer} ({i}/{total})")
+
+    return out
