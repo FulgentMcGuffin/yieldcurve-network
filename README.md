@@ -52,7 +52,7 @@ uv sync
 uv run ycn-gui
 ```
 
-Point the sidebar at a DuckDB or SQLite file. If the database contains a table called `par_rates` it is selected automatically, as is a column called `date`. Otherwise, choose your relevant columns. Choose a **Network Type**, optionally narrow the data, then click **Build network**.
+Point the sidebar at a DuckDB or SQLite file. If the database contains a table called `par_rates` it is selected automatically, as is a column called `date`. Otherwise, choose your relevant columns. Choose a **Network Type**, optionally narrow the data, then click **Build network**. 
 
 | Issuer MLN by Term | Term MLN by Issuer |
 |:---:|:---:|
